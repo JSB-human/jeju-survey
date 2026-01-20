@@ -24,6 +24,8 @@ interface MapViewProps {
   className?: string;
   isEditable?: boolean;
   onFeatureClick?: (id: string) => void;
+  useMobileLock?: boolean;
+  onGeometryChange?: (area: number, boundary: number[][]) => void;
 }
 
 const DEFAULT_CENTER: [number, number] = [126.5000, 33.3500]; // 제주도 중앙
@@ -39,6 +41,9 @@ const MapView: React.FC<MapViewProps> = ({
   selectedId,
   className,
   onFeatureClick,
+  isEditable,
+  useMobileLock,
+  onGeometryChange,
 }) => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapObjRef = useRef<maplibregl.Map | null>(null);
@@ -283,6 +288,7 @@ const MapView: React.FC<MapViewProps> = ({
       bearing: -15,
       // antialias: true, // 3D 객체 계단현상 방지 (고사양)
       attributionControl: false,
+      cooperativeGestures: useMobileLock, // 모바일 제스처 잠금 (두 손가락 스크롤)
       // 🚀 500 에러 및 InvalidStateError 원천 차단 로직
       transformRequest: (url, resourceType) => {
         if (resourceType === "Tile" && url.includes("vworld.kr")) {
