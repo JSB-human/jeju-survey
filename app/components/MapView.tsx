@@ -1,512 +1,559 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
-import Map from "ol/Map";
-import View from "ol/View";
-import TileLayer from "ol/layer/Tile";
-import XYZ from "ol/source/XYZ";
-import OSM from "ol/source/OSM";
-import VectorLayer from "ol/layer/Vector";
-import VectorSource from "ol/source/Vector";
-import Feature from "ol/Feature";
-import Point from "ol/geom/Point";
-import Polygon from "ol/geom/Polygon";
-import { fromLonLat, toLonLat } from "ol/proj";
-import { Style, Icon, Stroke, Fill, Circle as CircleStyle } from "ol/style";
-import { Draw, Modify, Snap } from "ol/interaction";
-import { getArea } from "ol/sphere";
-import {
-  Plus,
-  Minus,
-  Crosshair,
-  RotateCcw,
-  Trash2,
-  Hand,
-  Layers,
-} from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import maplibregl from "maplibre-gl";
+import { ColumnLayer, PathLayer, ScatterplotLayer, TextLayer, IconLayer } from "@deck.gl/layers";
+import { MapboxOverlay } from "@deck.gl/mapbox";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 const VWORLD_API_KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
 
 interface MapData {
   id: string;
   coordinates: { lat: number; lng: number };
-  boundary?: number[][]; // [[lng, lat], [lng, lat], ...]
+  boundary?: number[][];
+  area?: number;
   status?: string;
   type?: string;
   [key: string]: any;
 }
 
-interface OLMapViewProps {
+interface MapViewProps {
   data: MapData[];
   selectedId: string | null;
   className?: string;
   isEditable?: boolean;
-  useMobileLock?: boolean;
   onFeatureClick?: (id: string) => void;
-  onGeometryChange?: (area: number, coordinates: any) => void;
 }
 
-const OLMapView: React.FC<OLMapViewProps> = ({
+const DEFAULT_CENTER: [number, number] = [126.5000, 33.3500]; // 제주도 중앙
+
+const getElevation = (item: MapData) => {
+  if (typeof item.area === "number") return Math.max(item.area / 10, 50);
+  if (item.boundary?.length) return Math.max(item.boundary.length * 10, 50);
+  return 80;
+};
+
+const MapView: React.FC<MapViewProps> = ({
   data,
   selectedId,
   className,
-  isEditable = false,
-  useMobileLock = false,
   onFeatureClick,
-  onGeometryChange,
 }) => {
   const mapRef = useRef<HTMLDivElement>(null);
-  const [mapObj, setMapObj] = useState<Map | null>(null);
-  const vectorSourceRef = useRef<VectorSource | null>(null);
-  const drawInteractionRef = useRef<Draw | null>(null);
+  const mapObjRef = useRef<maplibregl.Map | null>(null);
+  const deckOverlayRef = useRef<InstanceType<typeof MapboxOverlay> | null>(null);
+  const [routeGeoJson, setRouteGeoJson] =
+    useState<GeoJSON.FeatureCollection | null>(null);
+  const [isRequestingRoute, setIsRequestingRoute] = useState(false);
+  const [startPoint, setStartPoint] = useState<MapData["coordinates"] | null>(
+    data[0]?.coordinates ?? null
+  );
+  const [endPoint, setEndPoint] = useState<MapData["coordinates"] | null>(
+    data[1]?.coordinates ?? null
+  );
+  const [isPicking, setIsPicking] = useState<"start" | "end" | null>(null);
+  const [mapMode, setMapMode] = useState<"satellite" | "standard">("satellite");
+  const [isRouteControlsOpen, setIsRouteControlsOpen] = useState(false);
 
-  const [isLocked, setIsLocked] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
-  const [mapType, setMapType] = useState<"Base" | "Satellite">("Satellite");
+  const routeSummary = useMemo(() => {
+    if (!routeGeoJson?.features?.length) return null;
+    const summaryFeature = routeGeoJson.features.find(
+      (feature) =>
+        feature.geometry?.type === "Point" &&
+        (feature.properties as { pointType?: string })?.pointType === "S"
+    );
+    return summaryFeature?.properties ?? null;
+  }, [routeGeoJson]);
 
-  // 모바일 화면 감지
+  // 경로 데이터 전처리: LineString만 추출하여 PathLayer용 데이터로 변환
+  const routePathData = useMemo(() => {
+    if (!routeGeoJson?.features) return [];
+    return routeGeoJson.features
+      .filter((f) => f.geometry.type === "LineString")
+      .map((f) => ({
+        path: (f.geometry as GeoJSON.LineString).coordinates,
+        properties: f.properties,
+      }));
+  }, [routeGeoJson]);
+
   useEffect(() => {
-    const handleResize = () => {
-      const mobile = window.innerWidth < 768;
-      setIsMobile(mobile);
-      if (!mobile) setIsLocked(false);
-    };
-
-    if (useMobileLock && isMobile) {
-      setIsLocked(true);
+    // 초기 로드 시에만 기본값 설정, 이후 초기화 시에는 재설정되지 않도록 함
+    if (data[0]?.coordinates && startPoint === undefined) {
+      setStartPoint(data[0].coordinates);
     }
-
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, [useMobileLock, isMobile]);
-
-  // 지도 초기화 (최초 1회)
-  useEffect(() => {
-    if (!mapRef.current) return;
-
-    // 1. 레이어 정의
-    const satelliteLayer = new TileLayer({
-      source: new XYZ({
-        url: `https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_API_KEY}/Satellite/{z}/{y}/{x}.jpeg`,
-      }),
-      visible: true, // 초기값 true (Satellite가 기본)
-      properties: { name: "satellite" },
-    });
-
-    const baseLayer = new TileLayer({
-      source: new XYZ({
-        url: `https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_API_KEY}/Base/{z}/{y}/{x}.png`,
-      }),
-      visible: false, // 초기값 false
-      properties: { name: "base" },
-    });
-
-    const hybridLayer = new TileLayer({
-      source: new XYZ({
-        url: `https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_API_KEY}/Hybrid/{z}/{y}/{x}.png`,
-      }),
-      visible: true, // 초기값 true (Satellite와 함께 표시)
-      properties: { name: "hybrid" },
-    });
-
-    // VWorld 키가 없을 때를 대비한 OSM 레이어
-    const osmLayer = new TileLayer({
-      source: new OSM(),
-      visible: !VWORLD_API_KEY,
-      properties: { name: "osm" },
-    });
-
-    // 벡터 레이어 (마커/다각형용)
-    const vectorSource = new VectorSource();
-    vectorSourceRef.current = vectorSource;
-
-    const vectorLayer = new VectorLayer({
-      source: vectorSource,
-      zIndex: 10,
-      style: (feature) => {
-        const geometry = feature.getGeometry();
-        const isSelected = feature.get("isSelected");
-
-        // 감귤색 테마
-        const strokeColor = isSelected ? "#ea580c" : "#f97316";
-        const fillColor = isSelected
-          ? "rgba(234, 88, 12, 0.4)"
-          : "rgba(249, 115, 22, 0.2)";
-
-        if (geometry instanceof Polygon) {
-          // 폴리곤 스타일 (영역)
-          const styles = [
-            new Style({
-              stroke: new Stroke({
-                color: strokeColor,
-                width: isSelected ? 4 : 2,
-              }),
-              fill: new Fill({ color: fillColor }),
-            }),
-          ];
-
-          // 선택되었거나 아이템이 하나뿐일 때(상세보기) 중심점 아이콘도 표시
-          if (isSelected || data.length === 1) {
-            const interiorPoint = geometry.getInteriorPoint();
-            // 커스텀 SVG 마커 (기존 코드 재사용)
-            const svg = `
-              <svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
-                <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
-                  <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="rgba(0,0,0,0.3)"/>
-                </filter>
-                <path d="M20 2C11.163 2 4 9.163 4 18c0 11 16 20 16 20s16-9 16-20c0-8.837-7.163-16-16-16z" fill="${strokeColor}" stroke="white" stroke-width="2" filter="url(#shadow)"/>
-                <circle cx="20" cy="18" r="6" fill="white"/>
-              </svg>`;
-
-            styles.push(
-              new Style({
-                geometry: interiorPoint,
-                image: new Icon({
-                  anchor: [0.5, 1],
-                  src:
-                    "data:image/svg+xml;charset=utf-8," +
-                    encodeURIComponent(svg),
-                  scale: isSelected ? 1.0 : 0.8,
-                }),
-                zIndex: 20,
-              })
-            );
-          }
-          return styles;
-        }
-
-        // 기본 마커 스타일 (Point일 경우 - fallback)
-        const svg = `
-          <svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
-            <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%">
-              <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="rgba(0,0,0,0.3)"/>
-            </filter>
-            <path d="M20 2C11.163 2 4 9.163 4 18c0 11 16 20 16 20s16-9 16-20c0-8.837-7.163-16-16-16z" fill="${strokeColor}" stroke="white" stroke-width="2" filter="url(#shadow)"/>
-            <circle cx="20" cy="18" r="6" fill="white"/>
-          </svg>`;
-
-        return new Style({
-          image: new Icon({
-            anchor: [0.5, 1],
-            src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg),
-            scale: isSelected ? 1.2 : 1.0,
-          }),
-          zIndex: isSelected ? 999 : 10,
-        });
-      },
-    });
-
-    // 2. 맵 생성
-    const layers = VWORLD_API_KEY
-      ? [baseLayer, satelliteLayer, hybridLayer, vectorLayer]
-      : [osmLayer, vectorLayer];
-
-    const map = new Map({
-      target: mapRef.current,
-      layers: layers,
-      view: new View({
-        center: fromLonLat([126.7121, 33.2801]),
-        zoom: 15,
-        smoothExtentConstraint: true,
-      }),
-      controls: [], // 기본 컨트롤 제거
-    });
-
-    setMapObj(map);
-
-    return () => map.setTarget(undefined);
-  }, []);
-
-  // 클릭 이벤트 리스너 등록/갱신
-  useEffect(() => {
-    if (!mapObj) return;
-
-    const clickHandler = (evt: any) => {
-      if (isEditable || isLocked) return;
-
-      const feature = mapObj.forEachFeatureAtPixel(evt.pixel, (f) => f);
-      if (feature && onFeatureClick) {
-        onFeatureClick(feature.getId() as string);
-      }
-    };
-
-    mapObj.on("click", clickHandler);
-    return () => mapObj.un("click", clickHandler);
-  }, [mapObj, isEditable, isLocked, onFeatureClick]);
-
-  // 지도 타입 변경
-  useEffect(() => {
-    if (!mapObj) return;
-
-    const layers = mapObj.getLayers();
-    layers.forEach((layer) => {
-      const name = layer.get("name");
-      if (name === "satellite") {
-        layer.setVisible(mapType === "Satellite");
-      } else if (name === "base") {
-        layer.setVisible(mapType === "Base");
-      } else if (name === "hybrid") {
-        // 하이브리드는 위성일 때 같이 킴
-        layer.setVisible(mapType === "Satellite");
-      }
-    });
-  }, [mapType, mapObj]);
-
-  // 데이터 변경 시 마커/폴리곤 업데이트
-  useEffect(() => {
-    if (!vectorSourceRef.current || !data) return;
-
-    const source = vectorSourceRef.current;
-    source.clear();
-
-    const features = data.map((item) => {
-      let feature;
-
-      // 1. 경계 데이터가 있으면 폴리곤 생성
-      if (item.boundary && item.boundary.length > 0) {
-        // boundary는 [[lng, lat], ...] 형태의 2차원 배열이라 가정하고
-        // OpenLayers Polygon은 [[[lng, lat], ...]] 형태의 3차원 배열(Ring)을 받음
-        const coordinates = [item.boundary.map((coord) => fromLonLat(coord))];
-        feature = new Feature({
-          geometry: new Polygon(coordinates),
-        });
-      }
-      // 2. 경계 데이터가 없으면 중심점 기준 자동 사각형 폴리곤 생성
-      else {
-        const center = fromLonLat([item.coordinates.lng, item.coordinates.lat]);
-        // 대략 20~30m 정도의 오프셋 (줌 레벨에 따라 적절한 크기로)
-        const offset = 20; // meters (approximately) at this scale
-        // Web Mercator 좌표계에서의 대략적 크기 계산 (간단하게 처리)
-        // 실제로는 위도에 따라 다르지만 시각적 표현을 위해 고정값 사용
-        const dx = 30;
-        const dy = 30;
-
-        const squareCoords = [
-          [
-            [center[0] - dx, center[1] - dy],
-            [center[0] + dx, center[1] - dy],
-            [center[0] + dx, center[1] + dy],
-            [center[0] - dx, center[1] + dy],
-            [center[0] - dx, center[1] - dy], // 닫힌 루프
-          ],
-        ];
-
-        feature = new Feature({
-          geometry: new Polygon(squareCoords),
-        });
-      }
-
-      feature.setId(item.id);
-      feature.set("isSelected", item.id === selectedId);
-      return feature;
-    });
-
-    source.addFeatures(features);
-
-    // 선택된 아이템으로 뷰 이동
-    if (selectedId && mapObj) {
-      const selected = data.find((d) => d.id === selectedId);
-      if (selected) {
-        mapObj.getView().animate({
-          center: fromLonLat([
-            selected.coordinates.lng,
-            selected.coordinates.lat,
-          ]),
-          duration: 700,
-          zoom: 18, // 줌 레벨을 조금 더 당겨서 영역이 잘 보이게 함
-        });
-      }
+    if (data[1]?.coordinates && endPoint === undefined) {
+      setEndPoint(data[1].coordinates);
     }
-  }, [data, selectedId, mapObj]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
-  // 편집 기능 관리
-  useEffect(() => {
-    if (!mapObj || !vectorSourceRef.current) return;
-
-    const map = mapObj;
-    const source = vectorSourceRef.current;
-
-    // 기존 인터랙션 제거
-    map.getInteractions().forEach((interaction) => {
-      if (
-        interaction instanceof Draw ||
-        interaction instanceof Modify ||
-        interaction instanceof Snap
-      ) {
-        map.removeInteraction(interaction);
-      }
-    });
-
-    if (isEditable && !isLocked) {
-      const modify = new Modify({ source });
-      map.addInteraction(modify);
-
-      // Draw는 기존 피처가 없을 때만 활성화하거나, 추가적인 영역을 그릴 때 사용
-      // 여기서는 기존 영역 수정을 우선으로 하므로, Draw는 버튼(초기화)을 통해 기존 것을 지우고 새로 그릴 때 사용됨.
-      // 하지만 isEditable 상태에서 빈 맵이라면 바로 그릴 수 있어야 함.
-
-      const draw = new Draw({
-        source: source,
-        type: "Polygon",
-        style: new Style({
-          fill: new Fill({ color: "rgba(249, 115, 22, 0.3)" }),
-          stroke: new Stroke({
-            color: "#f97316",
-            lineDash: [10, 10],
-            width: 2,
-          }),
-          image: new CircleStyle({
-            radius: 5,
-            stroke: new Stroke({ color: "#f97316" }),
-            fill: new Fill({ color: "rgba(255, 255, 255, 0.5)" }),
-          }),
+  // Deck.gl 레이어 구성
+  const deckLayers = useMemo(
+    () => {
+      const layers: any[] = [
+        new ColumnLayer({
+          id: "farmland-column",
+          data,
+          getPosition: (d: MapData) => [d.coordinates.lng, d.coordinates.lat],
+          getFillColor: (d: MapData) =>
+            d.id === selectedId ? [255, 107, 0, 230] : [0, 230, 118, 150],
+          getElevation,
+          radius: 25,
+          extruded: true,
+          pickable: true,
+          elevationScale: 1,
+          material: {
+            ambient: 0.3,
+            diffuse: 0.7,
+            shininess: 32,
+          },
+          transitions: {
+            getElevation: 600,
+            getFillColor: 600,
+          },
+          onClick: (info: { object?: MapData }) => {
+            if (info.object && onFeatureClick) onFeatureClick(info.object.id);
+          },
         }),
-      });
+      ];
 
-      draw.on("drawend", (event) => {
-        const geometry = event.feature.getGeometry() as Polygon;
+      // 경로 레이어 (PathLayer)
+      if (routePathData.length > 0) {
+        layers.push(
+          new PathLayer({
+            id: "route-path",
+            data: routePathData,
+            getPath: (d: any) => d.path,
+            getColor: [255, 107, 0, 200], // 오렌지 네온
+            getWidth: 10,
+            widthMinPixels: 4,
+            capRounded: true,
+            jointRounded: true,
+            pickable: true,
+          })
+        );
+      }
 
-        // 새로 그려진 geometry의 좌표를 LonLat으로 변환하여 상위로 전달
-        if (onGeometryChange) {
-          const coords = geometry
-            .getCoordinates()[0]
-            .map((coord: any) => toLonLat(coord));
-          onGeometryChange(getArea(geometry), coords);
+      // 출발/도착 마커 (IconLayer) - 핀 모양
+      const pointsData = [];
+      if (startPoint) pointsData.push({ position: [startPoint.lng, startPoint.lat], type: "start", label: "출발" });
+      if (endPoint) pointsData.push({ position: [endPoint.lng, endPoint.lat], type: "end", label: "도착" });
+
+      if (pointsData.length > 0) {
+        // 핀 아이콘 SVG
+        const pinIconMapping = {
+          marker: { x: 0, y: 0, width: 128, height: 128, mask: true }
+        };
+        
+        // 간단한 핀 모양 (채워진 원 + 꼬리)
+        const pinSvg = `https://raw.githubusercontent.com/visgl/deck.gl-data/master/website/icon-atlas.png`; // 예시용, 실제로는 SVG path나 이미지 URL 사용 권장
+
+        layers.push(
+          new ScatterplotLayer({
+            id: "route-points-base",
+            data: pointsData,
+            getPosition: (d: any) => d.position,
+            getFillColor: (d: any) => d.type === "start" ? [34, 197, 94] : [239, 68, 68],
+            getRadius: 8,
+            radiusMinPixels: 8,
+            stroked: true,
+            getLineColor: [255, 255, 255],
+            getLineWidth: 2,
+          }),
+          new TextLayer({
+            id: "route-labels",
+            data: pointsData,
+            getPosition: (d: any) => d.position,
+            getText: (d: any) => d.label,
+            getSize: 14,
+            getColor: [255, 255, 255],
+            getPixelOffset: [0, -28],
+            background: true,
+            getBackgroundColor: (d: any) => d.type === "start" ? [34, 197, 94, 200] : [239, 68, 68, 200],
+            backgroundPadding: [8, 4],
+            billboard: true,
+            fontFamily: '"Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif',
+            fontWeight: 700,
+            characterSet: "auto",
+            
+          })
+        );
+      }
+
+      // 거리/시간 정보 텍스트 (도착지 위에 표시)
+      if (routeSummary && endPoint) {
+        const totalDistKm = (routeSummary.totalDistance / 1000).toFixed(1);
+        const totalTimeMin = Math.round(routeSummary.totalTime / 60);
+        
+        layers.push(
+          new TextLayer({
+            id: "route-info-text",
+            data: [{ position: [endPoint.lng, endPoint.lat], text: `${totalDistKm}km | ${totalTimeMin}분` }],
+            getPosition: (d: any) => d.position,
+            getText: (d: any) => d.text,
+            getSize: 20,
+            getColor: [255, 255, 255],
+            getPixelOffset: [0, -60], // 라벨 위로 띄움
+            background: true,
+            getBackgroundColor: [0, 0, 0, 200],
+            backgroundPadding: [8, 4],
+            fontFamily: '"Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif',
+            fontWeight: 800,
+            characterSet: "auto",
+          })
+        );
+      }
+
+      return layers;
+    },
+    [data, selectedId, onFeatureClick, routePathData, startPoint, endPoint, routeSummary]
+  );
+
+  // 2. MapLibre 스타일: VWorld + 테슬라 감성 옵션
+  const mapStyle = useMemo<maplibregl.StyleSpecification>(() => {
+    if (!VWORLD_API_KEY) {
+      return {
+        version: 8,
+        sources: { osm: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256 } },
+        layers: [{ id: "osm", type: "raster", source: "osm" }],
+      } as any;
+    }
+
+    return {
+      version: 8,
+      sources: {
+        vworldBase: {
+          type: "raster",
+          tiles: [`https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_API_KEY}/Base/{z}/{y}/{x}.png`],
+          tileSize: 256,
+          maxzoom: 18,
+        },
+        vworldSatellite: {
+          type: "raster",
+          tiles: [`https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_API_KEY}/Satellite/{z}/{y}/{x}.jpeg`],
+          tileSize: 256,
+          maxzoom: 18,
+        },
+        vworldHybrid: {
+          type: "raster",
+          tiles: [`https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_API_KEY}/Hybrid/{z}/{y}/{x}.png`],
+          tileSize: 256,
+          maxzoom: 18,
         }
-      });
+      },
+      layers: [
+        mapMode === "standard"
+          ? {
+              id: "base",
+              type: "raster",
+              source: "vworldBase",
+            }
+          : {
+              id: "satellite",
+              type: "raster",
+              source: "vworldSatellite",
+              paint: {
+                // "raster-brightness-max": 0.5, 
+              }
+            },
+        mapMode === "satellite" && {
+          id: "hybrid",
+          type: "raster",
+          source: "vworldHybrid",
+        }
+      ].filter(Boolean) as maplibregl.LayerSpecification[],
+    };
+  }, [mapMode]);
 
-      drawInteractionRef.current = draw;
-      map.addInteraction(draw);
-      map.addInteraction(new Snap({ source }));
+  useEffect(() => {
+    if (!mapRef.current || mapObjRef.current) return;
 
-      modify.on("modifyend", (event) => {
-        const features = event.features.getArray();
-        if (features.length > 0) {
-          const geometry = features[0].getGeometry() as Polygon;
-          if (onGeometryChange) {
-            const coords = geometry
-              .getCoordinates()[0]
-              .map((coord: any) => toLonLat(coord));
-            onGeometryChange(getArea(geometry), coords);
+    const center = data[0]?.coordinates
+      ? ([data[0].coordinates.lng, data[0].coordinates.lat] as [number, number])
+      : DEFAULT_CENTER;
+
+    const map = new maplibregl.Map({
+      container: mapRef.current,
+      style: mapStyle,
+      center,
+      zoom: 16,
+      maxZoom: 22,
+      pitch: 65,   // 테슬라 뷰포트 각도
+      bearing: -15,
+      // antialias: true, // 3D 객체 계단현상 방지 (고사양)
+      attributionControl: false,
+      // 🚀 500 에러 및 InvalidStateError 원천 차단 로직
+      transformRequest: (url, resourceType) => {
+        if (resourceType === "Tile" && url.includes("vworld.kr")) {
+          const parts = url.split("/");
+          // 'dem', 'Satellite', 'Base', 'Hybrid' 키워드 뒤의 숫자가 줌 레벨
+          const typeIndex = parts.findIndex(p => ["dem", "Satellite", "Base", "Hybrid"].includes(p));
+          if (typeIndex !== -1) {
+            const z = parseInt(parts[typeIndex + 1]);
+            if (z > 18) {
+              parts[typeIndex + 1] = "18"; // 데이터를 18로 고정하여 서버 404/500 방지
+              return { url: parts.join("/") };
+            }
           }
         }
+        return { url };
+      }
+    });
+
+    // 3. Deck.gl 오버레이 연결
+    const deckOverlay = new MapboxOverlay({ layers: deckLayers });
+    map.addControl(deckOverlay as any);
+    deckOverlayRef.current = deckOverlay;
+    mapObjRef.current = map;
+
+    map.once("load", () => {
+      map.resize();
+      
+      // 🚀 지형 데이터: 브이월드 대신 안정적인 글로벌 무료 소스 사용 (에러 방지)
+      map.addSource("global-terrain", {
+        type: "raster-dem",
+        tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+        encoding: "terrarium", // 표준 인코딩
+        tileSize: 256,
+        maxzoom: 15
       });
+    
+      map.setTerrain({ source: "global-terrain", exaggeration: 1.5 });
+    });
+
+    return () => {
+      map.remove();
+      mapObjRef.current = null;
+    };
+  }, []); // 마운트 시 한 번만 실행 (스타일 변경은 setStyle로 처리)
+
+  // 스타일 동적 변경
+  useEffect(() => {
+    if (mapObjRef.current) {
+      mapObjRef.current.setStyle(mapStyle);
     }
-  }, [isEditable, isLocked, onGeometryChange, mapObj]);
+  }, [mapStyle]);
 
-  // 커스텀 컨트롤 핸들러
-  const zoomIn = () =>
-    mapObj?.getView().setZoom((mapObj?.getView().getZoom() || 0) + 1);
-
-  const zoomOut = () =>
-    mapObj?.getView().setZoom((mapObj?.getView().getZoom() || 0) - 1);
-
-  const resetView = () => {
-    if (data.length > 0 && mapObj) {
-      mapObj.getView().animate({
-        center: fromLonLat([data[0].coordinates.lng, data[0].coordinates.lat]),
-        zoom: 15,
-        duration: 1000,
-      });
+  // 데이터 변경 시 deck.gl 레이어 동기화
+  useEffect(() => {
+    if (deckOverlayRef.current) {
+      deckOverlayRef.current.setProps({ layers: deckLayers });
     }
+  }, [deckLayers]);
+
+  useEffect(() => {
+    if (!mapObjRef.current) return;
+    const map = mapObjRef.current;
+    const handleClick = (event: maplibregl.MapMouseEvent) => {
+      if (!isPicking) return;
+      const { lng, lat } = event.lngLat;
+      if (isPicking === "start") {
+        setStartPoint({ lng, lat });
+      } else {
+        setEndPoint({ lng, lat });
+      }
+      setIsPicking(null);
+    };
+    map.on("click", handleClick);
+    return () => {
+      map.off("click", handleClick);
+    };
+  }, [isPicking]);
+
+  const formatPredictionTime = (date: Date) => {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const tzOffset = -date.getTimezoneOffset();
+    const sign = tzOffset >= 0 ? "+" : "-";
+    const hours = pad(Math.floor(Math.abs(tzOffset) / 60));
+    const minutes = pad(Math.abs(tzOffset) % 60);
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+      date.getDate()
+    )}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+      date.getSeconds()
+    )}${sign}${hours}${minutes}`;
   };
 
-  const toggleMapType = () => {
-    setMapType((prev) => (prev === "Base" ? "Satellite" : "Base"));
+  const requestRoutePrediction = async () => {
+    if (isRequestingRoute) return;
+    if (!startPoint || !endPoint) {
+      alert("출발/도착 지점이 최소 2개 필요합니다.");
+      return;
+    }
+
+    setIsRequestingRoute(true);
+    try {
+      const response = await fetch("/api/tmap/route-prediction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          routesInfo: {
+            departure: {
+              name: "출발",
+              lon: String(startPoint.lng),
+              lat: String(startPoint.lat),
+              depSearchFlag: "03",
+            },
+            destination: {
+              name: "도착",
+              lon: String(endPoint.lng),
+              lat: String(endPoint.lat),
+              destSearchFlag: "03",
+            },
+            predictionType: "departure",
+            predictionTime: formatPredictionTime(new Date()),
+            searchOption: "00",
+            tollgateCarType: "car",
+          },
+          query: {
+            version: "1",
+            reqCoordType: "WGS84GEO",
+            resCoordType: "WGS84GEO",
+            sort: "index",
+            trafficInfo: "N",
+          },
+        }),
+      });
+      let payload: any = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      if (!response.ok) {
+        const detail =
+          payload?.error || payload?.details || "TMAP 예측 경로 요청 실패";
+        throw new Error(detail);
+      }
+      const geoJson =
+        payload?.features?.length ? payload : payload?.geojson ?? null;
+      if (geoJson) {
+        setRouteGeoJson(geoJson);
+      } else {
+        console.error("TMAP 응답에서 경로 데이터를 찾지 못했습니다.", payload);
+        alert("경로 데이터를 찾지 못했습니다.");
+      }
+    } catch (error) {
+      console.error(error);
+      alert("TMAP 예측 경로 요청 중 오류가 발생했습니다.");
+    } finally {
+      setIsRequestingRoute(false);
+    }
   };
 
   return (
-    <div className={`relative overflow-hidden group ${className}`}>
+    <div className={`group relative overflow-hidden bg-white ${className ?? ""}`}>
+      {/* 테슬라 스타일 비네팅 오버레이 (선택 사항) */}
+      <div className="absolute inset-0 pointer-events-none z-10 shadow-[inset_0_0_150px_rgba(0,0,0,0.2)]" />
       <div ref={mapRef} className="w-full h-full" />
 
-      {/* Floating Controls */}
-      <div className="absolute top-4 right-4 z-10 flex flex-col space-y-2">
-        <div className="flex flex-col bg-white/90 backdrop-blur-md border border-[#ececec] rounded-2xl shadow-xl overflow-hidden">
-          <button
-            onClick={zoomIn}
-            className="w-10 h-10 flex items-center justify-center text-[#37352f] hover:bg-orange-50 hover:text-orange-600 transition-all"
-            title="확대"
-          >
-            <Plus className="w-3 h-3" />
-          </button>
-          <div className="h-[1px] bg-[#f1f1ef] mx-2"></div>
-          <button
-            onClick={zoomOut}
-            className="w-10 h-10 flex items-center justify-center text-[#37352f] hover:bg-orange-50 hover:text-orange-600 transition-all"
-            title="축소"
-          >
-            <Minus className="w-3 h-3" />
-          </button>
-        </div>
-
+      {/* 상단 우측 지도 모드 토글 (플로팅) */}
+      <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 items-end">
         <button
-          onClick={resetView}
-          className="w-10 h-10 bg-white/90 backdrop-blur-md border border-[#ececec] rounded-2xl shadow-xl flex items-center justify-center text-orange-500 hover:bg-orange-500 hover:text-white transition-all"
-          title="내 위치로"
+          type="button"
+          onClick={() => setMapMode(prev => prev === "satellite" ? "standard" : "satellite")}
+          className="px-3 py-2 rounded-xl bg-white/90 backdrop-blur-md border border-slate-200 text-xs font-bold text-slate-700 shadow-lg hover:bg-white transition-all whitespace-nowrap flex items-center gap-2"
         >
-          <Crosshair className="w-3 h-3" />
+          {mapMode === "satellite" ? (
+            <>
+              <div className="w-2 h-2 rounded-full bg-emerald-500" />
+              일반지도 보기
+            </>
+          ) : (
+            <>
+              <div className="w-2 h-2 rounded-full bg-blue-500" />
+              위성지도 보기
+            </>
+          )}
         </button>
 
+        {/* 경로 예측 도구 토글 버튼 */}
         <button
-          onClick={toggleMapType}
-          className={`w-10 h-10 backdrop-blur-md border border-[#ececec] rounded-2xl shadow-xl flex items-center justify-center transition-all ${
-            mapType === "Satellite"
-              ? "bg-orange-600 text-white hover:bg-orange-700"
-              : "bg-white/90 text-[#37352f] hover:bg-[#fbfbfa]"
+          type="button"
+          onClick={() => setIsRouteControlsOpen(!isRouteControlsOpen)}
+          className={`px-3 py-2 rounded-xl backdrop-blur-md border text-xs font-bold shadow-lg transition-all whitespace-nowrap flex items-center gap-2 ${
+            isRouteControlsOpen 
+              ? "bg-orange-500 border-orange-600 text-white"
+              : "bg-white/90 border-slate-200 text-slate-700 hover:bg-white"
           }`}
-          title={mapType === "Base" ? "위성지도로 전환" : "일반지도로 전환"}
         >
-          <Layers className="w-3 h-3" />
+          <div className={`w-2 h-2 rounded-full ${isRouteControlsOpen ? "bg-white" : "bg-orange-500"}`} />
+          {isRouteControlsOpen ? "경로 도구 닫기" : "경로 예측 도구"}
         </button>
       </div>
 
-      {/* Editing Tools */}
-      {isEditable && !isLocked && (
-        <div className="absolute top-52 right-4 z-10 flex flex-col space-y-2 animate-in slide-in-from-right duration-300">
-          <button
-            onClick={() => drawInteractionRef.current?.removeLastPoint()}
-            className="w-10 h-10 bg-white border border-[#ececec] rounded-2xl shadow-xl flex items-center justify-center text-[#37352f] hover:bg-orange-50 transition-all"
-            title="마지막 점 취소"
-          >
-            <RotateCcw className="w-3 h-3" />
-          </button>
-          <button
-            onClick={() => {
-              vectorSourceRef.current?.clear();
-              if (onGeometryChange) onGeometryChange(0, []);
-            }}
-            className="w-10 h-10 bg-white border border-[#ececec] rounded-2xl shadow-xl flex items-center justify-center text-red-500 hover:bg-red-50 transition-all"
-            title="초기화"
-          >
-            <Trash2 className="w-3 h-3" />
-          </button>
-        </div>
-      )}
-
-      {/* Mobile Lock Overlay */}
-      {useMobileLock && isMobile && isLocked && (
-        <div
-          onClick={() => setIsLocked(false)}
-          className="absolute inset-0 z-20 bg-black/5 backdrop-blur-[1px] flex items-center justify-center cursor-pointer"
-        >
-          <div className="bg-white/95 px-5 py-3 rounded-2xl shadow-2xl border border-[#ececec] flex items-center space-x-3 animate-in zoom-in duration-300">
-            <Hand className="w-4 h-4 text-orange-500 animate-bounce" />
-            <span className="text-xs font-black text-[#37352f]">
-              탭하여 지도 잠금 해제
-            </span>
+      {/* 안내 메시지 (픽킹 모드일 때) */}
+      {isPicking && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-30 animate-bounce">
+          <div className="bg-[#37352f] text-white px-4 py-2 rounded-full shadow-lg font-bold text-sm">
+            지도에서 {isPicking === "start" ? "출발지" : "도착지"}를 클릭하세요
           </div>
         </div>
       )}
 
-      {!VWORLD_API_KEY && (
-        <div className="absolute bottom-1 left-1/2 -translate-x-1/2 z-0 pointer-events-none opacity-50">
-          <p className="text-[10px] text-gray-500">
-            VWorld API Key Required for satellite view
-          </p>
+      {/* 하단 컨트롤 바 (토글됨) */}
+      {isRouteControlsOpen && (
+        <div className="absolute bottom-6 left-4 right-4 md:left-1/2 md:-translate-x-1/2 md:w-auto md:right-auto z-20 animate-in slide-in-from-bottom-4 duration-300">
+          <div className="flex flex-col md:flex-row items-center gap-3 bg-white/90 backdrop-blur-md p-2 rounded-2xl shadow-xl border border-slate-200 w-full md:w-auto overflow-x-auto">
+            
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsPicking("start")}
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1 ${
+                  isPicking === "start"
+                    ? "bg-emerald-600 text-white ring-2 ring-emerald-400"
+                    : "bg-slate-100 text-[#37352f] hover:bg-slate-200"
+                }`}
+              >
+                <div className="w-2 h-2 rounded-full bg-emerald-400" />
+                출발
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsPicking("end")}
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1 ${
+                  isPicking === "end"
+                    ? "bg-rose-600 text-white ring-2 ring-rose-400"
+                    : "bg-slate-100 text-[#37352f] hover:bg-slate-200"
+                }`}
+              >
+                <div className="w-2 h-2 rounded-full bg-rose-400" />
+                도착
+              </button>
+            </div>
+
+            <div className="w-px h-6 bg-slate-200 hidden md:block" />
+
+            <div className="flex items-center gap-2 shrink-0 w-full md:w-auto">
+              <button
+                type="button"
+                onClick={requestRoutePrediction}
+                disabled={isRequestingRoute || !startPoint || !endPoint}
+                className="flex-1 md:flex-none px-4 py-2 rounded-xl bg-orange-600 text-xs font-bold text-white shadow-md hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95 whitespace-nowrap"
+              >
+                {isRequestingRoute ? "계산 중..." : "경로 예측"}
+              </button>
+              
+              {routeGeoJson && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRouteGeoJson(null);
+                    setStartPoint(null);
+                    setEndPoint(null);
+                  }}
+                  className="px-3 py-2 rounded-xl bg-slate-100 text-xs font-bold text-[#9b9a97] hover:bg-slate-200 hover:text-[#37352f] transition-all whitespace-nowrap"
+                >
+                  지우기
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
   );
 };
 
-export default OLMapView;
+export default MapView;
