@@ -2,9 +2,14 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
-import { ColumnLayer, PathLayer, ScatterplotLayer, TextLayer, IconLayer } from "@deck.gl/layers";
+import { ColumnLayer, PathLayer, ScatterplotLayer, TextLayer, GeoJsonLayer } from "@deck.gl/layers";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import "maplibre-gl/dist/maplibre-gl.css";
+
+import { ScenegraphLayer } from "@deck.gl/mesh-layers";
+import { TripsLayer } from "@deck.gl/geo-layers";
+import { PathStyleExtension } from "@deck.gl/extensions";
+
 
 const VWORLD_API_KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
 
@@ -52,14 +57,60 @@ const MapView: React.FC<MapViewProps> = ({
     useState<GeoJSON.FeatureCollection | null>(null);
   const [isRequestingRoute, setIsRequestingRoute] = useState(false);
   const [startPoint, setStartPoint] = useState<MapData["coordinates"] | null>(
-    data[0]?.coordinates ?? null
+     null
   );
   const [endPoint, setEndPoint] = useState<MapData["coordinates"] | null>(
-    data[1]?.coordinates ?? null
+     null
   );
   const [isPicking, setIsPicking] = useState<"start" | "end" | null>(null);
   const [mapMode, setMapMode] = useState<"satellite" | "standard">("satellite");
   const [isRouteControlsOpen, setIsRouteControlsOpen] = useState(false);
+
+
+  // 선택된 땅(필지) 데이터 저장용
+  const [selectedLand, setSelectedLand] = useState<any>(null);
+  const [isLandLoading, setIsLandLoading] = useState(false);
+
+
+  // 네비게이션 경로 애니메이션 시간
+  const [time, setTime] = useState(0);
+  const animationFrame = useRef<number>(0);
+
+  const handleMapClick = async (info: any) => {
+    // 나무나 마커를 클릭했을 땐 실행 X (땅을 클릭했을 때만)
+    if (info.object) return; 
+
+    const { coordinate } = info;
+    if (!coordinate) return;
+
+    setIsLandLoading(true);
+    try {
+      // 위에서 만든 백엔드 API 호출
+      const res = await fetch(`/api/land?lng=${coordinate[0]}&lat=${coordinate[1]}`);
+      const geoJson = await res.json();
+
+      if (geoJson.features && geoJson.features.length > 0) {
+        // 가장 첫 번째 필지 선택
+        setSelectedLand(geoJson.features[0]);
+      } else {
+        setSelectedLand(null); // 빈 땅 클릭 시 선택 해제
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLandLoading(false);
+    }
+  };
+
+
+  useEffect(() => {
+    const animate = () => {
+      setTime((t) => (t + 1) % 100); 
+      animationFrame.current = requestAnimationFrame(animate);
+    };
+    animationFrame.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(animationFrame.current);
+  }, []);
 
   const routeSummary = useMemo(() => {
     if (!routeGeoJson?.features?.length) return null;
@@ -70,6 +121,22 @@ const MapView: React.FC<MapViewProps> = ({
     );
     return summaryFeature?.properties ?? null;
   }, [routeGeoJson]);
+
+  const tripsData = useMemo(() => {
+    if (!routeGeoJson?.features) return [];
+
+    return routeGeoJson.features
+      .filter((f: any) => f.geometry.type === "LineString")
+      .map((f: any) => {
+        const coords = f.geometry.coordinates;
+        // 경로의 시작(0)부터 끝(100)까지 시간을 순차적으로 매핑
+        return {
+          path: coords,
+          timestamps: coords.map((_: any, i: number) => (i / (coords.length - 1)) * 100),
+        };
+      });
+  }, [routeGeoJson]);
+
 
   // 경로 데이터 전처리: LineString만 추출하여 PathLayer용 데이터로 변환
   const routePathData = useMemo(() => {
@@ -97,48 +164,176 @@ const MapView: React.FC<MapViewProps> = ({
   const deckLayers = useMemo(
     () => {
       const layers: any[] = [
-        new ColumnLayer({
-          id: "farmland-column",
+
+        // 3D 나무 레이어
+        new (ScenegraphLayer as any)({
+          id: "farmland-trees",
           data,
-          getPosition: (d: MapData) => [d.coordinates.lng, d.coordinates.lat],
-          getFillColor: (d: MapData) =>
-            d.id === selectedId ? [255, 107, 0, 230] : [0, 230, 118, 150],
-          getElevation,
-          radius: 25,
-          extruded: true,
           pickable: true,
-          elevationScale: 1,
-          material: {
-            ambient: 0.3,
-            diffuse: 0.7,
-            shininess: 32,
-          },
-          transitions: {
-            getElevation: 600,
-            getFillColor: 600,
-          },
+          scenegraph: "/models/orange_tree.glb",
+          
+          getPosition: (d: any) => [
+            d.coordinates.lng, 
+            d.coordinates.lat, 
+            // 나무 높이보다 살짝 높게 설정 (예: 20미터 위)
+            // 나무 모델 사이즈(sizeScale)가 20이라면 그보다 조금 더 높게 잡으세요.
+            25 
+          ],
+          getOrientation: (d: MapData) => [0, Math.random() * 360, 90],
+          sizeScale: 20, 
+          _lighting: "pbr",
+          
+          getScale: (d: MapData) => d.id === selectedId ? [1.5, 1.5, 1.5] : [1, 1, 1],
+   
           onClick: (info: { object?: MapData }) => {
             if (info.object && onFeatureClick) onFeatureClick(info.object.id);
           },
         }),
+
+        new TextLayer({
+          id: "info-labels",
+          data,
+          pickable: true,
+          // 나무 위치와 동일하게 잡음
+          getPosition: (d: MapData) => [d.coordinates.lng, d.coordinates.lat],
+          
+          // 📝 표시할 텍스트 (지명 + 나무 본수)
+          getText: (d: MapData) => {
+            // 데이터에 treeCount가 없으면 임의로 50~100 사이 숫자로 가정
+            const treeCount = d.treeCount || Math.floor(Math.random() * 50) + 50; 
+            // 줄바꿈(\n)을 써서 두 줄로 표시
+            return `${d.address || '알 수 없는 곳'}\n🌲 ${treeCount}본`;
+          },
+          
+          // 스타일링
+          getSize: 14,
+          getColor: [255, 255, 255], // 흰색 글씨
+          
+          // 🚀 위치 조정 (나무 꼭대기 위로 띄우기)
+          getPixelOffset: [0, 50], // Y축으로 -50픽셀 위로 올림
+          
+          // 배경 박스 (가독성 UP)
+          background: true,
+          getBackgroundColor: [0, 0, 0, 160], // 반투명 검은색 (R, G, B, Alpha)
+          backgroundPadding: [8, 4], // 여백 [가로, 세로]
+          
+          // 폰트 설정
+          fontFamily: '"Pretendard", "Malgun Gothic", sans-serif',
+          fontWeight: 700,
+          
+          // ⭐ 중요: 한글 깨짐 방지
+          characterSet: "auto", 
+          
+          // 빌보드 효과 (지도를 돌려도 글자는 항상 정면을 봄)
+          billboard: true,
+          
+          // 겹침 방지 (선택 사항: 글자가 너무 많으면 켜세요)
+          // collisionEnabled: true, 
+        }),
       ];
 
-      // 경로 레이어 (PathLayer)
-      if (routePathData.length > 0) {
+      if (selectedLand) {
         layers.push(
-          new PathLayer({
-            id: "route-path",
-            data: routePathData,
-            getPath: (d: any) => d.path,
-            getColor: [255, 107, 0, 200], // 오렌지 네온
-            getWidth: 10,
-            widthMinPixels: 4,
-            capRounded: true,
-            jointRounded: true,
+          new GeoJsonLayer({
+            id: "selected-land-polygon",
+            data: selectedLand,
             pickable: true,
+            stroked: true,
+            filled: true,
+            extruded: false,
+            
+            // 🚀 [수정 포인트 1] 면 색상: 보라색 대신 '아주 희미한 청록색'
+            // 투명도(맨 뒤 숫자)를 20~30 정도로 아주 낮춰서, 
+            // 땅의 위성 사진이 그대로 비치면서 살짝 '선택된 느낌'만 줍니다.
+            getFillColor: mapMode === "standard" ? [0, 219, 127, 20] : [245, 219, 127, 20], 
+
+            // 🚀 [수정 포인트 2] 선 색상: '완전한 형광 Cyan'
+            // 알파값을 255로 꽉 채워서 빛나는 느낌을 줍니다.
+            getLineColor: mapMode === "standard" ? [0, 219, 127, 255] : [245, 219, 127, 255], 
+
+            // 🚀 [수정 포인트 3] 두께: 얇고 예리하게
+            // 굵으면 촌스럽습니다. 2~3픽셀로 얇게 그리는 게 훨씬 세련됩니다.
+            getLineWidth: 2,
+            lineWidthMinPixels: 2,
+            
+            // 🚀 [수정 포인트 4] 점선 제거 & 부드러운 마감
+            // 점선(dash) 확장을 빼버리고, 모서리를 둥글게 처리합니다.
+            lineJointRounded: true,
+            lineCapRounded: true,
+
+            // ✨ [꿀팁] 지형이랑 겹쳐서 깜빡거리는 현상(Z-fighting) 방지
+            // 폴리곤을 카메라 쪽으로 아주 살짝 띄웁니다.
+            parameters: {
+              depthTest: false, // 혹은 getPolygonOffset 사용
+            },
+             // 만약 depthTest: false가 너무 떠 보이면 아래 옵션 사용
+            getPolygonOffset: ({ layerIndex }: { layerIndex: number }) => [0, -layerIndex * 100],
           })
         );
       }
+
+      if (tripsData.length > 0) {
+      
+        // (A) 베이스 라인: 희미한 전선 (길이 어디 있는지 알려줌)
+        layers.push(
+          new PathLayer({
+            id: "route-base",
+            data: routeGeoJson?.features.filter((f: any) => f.geometry.type === "LineString"),
+            getPath: (d: any) => d.geometry.coordinates,
+            getColor: [245, 73, 39], 
+            getWidth: 10,
+            widthMinPixels: 2, 
+            capRounded: true,
+            jointRounded: true,
+          } as any)
+        );
+  
+        // (B) 에너지 흐름: 빛나는 네온 펄스
+        layers.push(
+          new (TripsLayer as any)({
+            id: "route-pulse",
+            data: tripsData,
+            getPath: (d: any) => d.path,
+            getTimestamps: (d: any) => d.timestamps,
+            getColor: [0, 0, 0], 
+            opacity: 1,
+            widthMinPixels: 5, // 베이스보다 살짝 얇게 해서 가운데가 빛나는 느낌
+            rounded: true,
+            
+            // ✨ 꼬리 길이 (길수록 스피디해 보임)
+            trailLength: 30, 
+            
+            currentTime: time,
+            shadowEnabled: false,
+            
+            // ✨ 빛나는 효과의 핵심 (Additive Blending)
+            // 배경이 어두울수록 빛이 더 강렬하게 보입니다.
+            parameters: {
+              blend: true,
+              blendFunc: ["ONE", "ONE"], // WebGL Additive Blending 상수
+            }
+          } as any)
+        );
+      }
+
+
+
+      // 경로 레이어 (PathLayer)
+      // if (routePathData.length > 0) {
+      //   layers.push(
+      //     new PathLayer({
+      //       id: "route-path",
+      //       data: routePathData,
+      //       getPath: (d: any) => d.path,
+      //       getColor: [255, 107, 0, 200], // 오렌지 네온
+      //       getWidth: 10,
+      //       widthMinPixels: 4,
+      //       capRounded: true,
+      //       jointRounded: true,
+      //       pickable: true,
+      //     })
+      //   );
+      // }
 
       // 출발/도착 마커 (IconLayer) - 핀 모양
       const pointsData = [];
@@ -146,13 +341,6 @@ const MapView: React.FC<MapViewProps> = ({
       if (endPoint) pointsData.push({ position: [endPoint.lng, endPoint.lat], type: "end", label: "도착" });
 
       if (pointsData.length > 0) {
-        // 핀 아이콘 SVG
-        const pinIconMapping = {
-          marker: { x: 0, y: 0, width: 128, height: 128, mask: true }
-        };
-        
-        // 간단한 핀 모양 (채워진 원 + 꼬리)
-        const pinSvg = `https://raw.githubusercontent.com/visgl/deck.gl-data/master/website/icon-atlas.png`; // 예시용, 실제로는 SVG path나 이미지 URL 사용 권장
 
         layers.push(
           new ScatterplotLayer({
@@ -212,7 +400,7 @@ const MapView: React.FC<MapViewProps> = ({
 
       return layers;
     },
-    [data, selectedId, onFeatureClick, routePathData, startPoint, endPoint, routeSummary]
+    [data, selectedId, onFeatureClick, tripsData, time, routeGeoJson, startPoint, endPoint, routeSummary]
   );
 
   // 2. MapLibre 스타일: VWorld + 테슬라 감성 옵션
@@ -308,25 +496,25 @@ const MapView: React.FC<MapViewProps> = ({
     });
 
     // 3. Deck.gl 오버레이 연결
-    const deckOverlay = new MapboxOverlay({ layers: deckLayers });
+    const deckOverlay = new MapboxOverlay({ layers: deckLayers, onClick: handleMapClick, });
     map.addControl(deckOverlay as any);
     deckOverlayRef.current = deckOverlay;
     mapObjRef.current = map;
 
-    map.once("load", () => {
-      map.resize();
+    // map.once("load", () => {
+    //   map.resize();
       
-      // 🚀 지형 데이터: 브이월드 대신 안정적인 글로벌 무료 소스 사용 (에러 방지)
-      map.addSource("global-terrain", {
-        type: "raster-dem",
-        tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
-        encoding: "terrarium", // 표준 인코딩
-        tileSize: 256,
-        maxzoom: 15
-      });
+    //   // 🚀 지형 데이터: 브이월드 대신 안정적인 글로벌 무료 소스 사용 (에러 방지)
+    //   map.addSource("global-terrain", {
+    //     type: "raster-dem",
+    //     tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+    //     encoding: "terrarium", // 표준 인코딩
+    //     tileSize: 256,
+    //     maxzoom: 15
+    //   });
     
-      map.setTerrain({ source: "global-terrain", exaggeration: 1.5 });
-    });
+    //   map.setTerrain({ source: "global-terrain", exaggeration: 1.5 });
+    // });
 
     return () => {
       map.remove();
@@ -556,6 +744,50 @@ const MapView: React.FC<MapViewProps> = ({
               )}
             </div>
           </div>
+        </div>
+      )}
+
+
+      {/* 선택된 땅(필지) 정보 표시 */}
+      {selectedLand && (
+        <div className="absolute top-20 left-4 z-30 w-64 animate-in slide-in-from-left duration-300">
+          <div className="bg-black/80 backdrop-blur-md border border-slate-600 p-4 rounded-2xl shadow-2xl text-white">
+            <div className="flex justify-between items-start mb-2">
+              <h3 className="text-sm font-bold text-emerald-400">{selectedLand.properties.addr}</h3>
+              <button 
+                onClick={() => setSelectedLand(null)}
+                className="text-slate-400 hover:text-white"
+              >✕</button>
+            </div>
+            
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between border-b border-slate-700 pb-1">
+                <span className="text-slate-400">지번</span>
+                <span className="font-bold">{selectedLand.properties.jibun}</span>
+              </div>
+              {/* <div className="flex justify-between border-b border-slate-700 pb-1">
+                <span className="text-slate-400">지목</span>
+                <span className="font-bold">{selectedLand.properties.jimok}</span>
+              </div> */}
+              <div className="flex justify-between border-b border-slate-700 pb-1">
+                <span className="text-slate-400">기준년월</span>
+                <span className="font-bold text-orange-400">
+                  {/* 브이월드 데이터에 면적이 있다면 표시, 없으면 계산 */}
+                  {selectedLand.properties.pnu ? selectedLand.properties.gosi_year + "년 " + selectedLand.properties.gosi_month + "월" : "-"} 
+                </span>
+              </div>
+              <div className="mt-2 text-[10px] text-slate-500 font-mono">
+                PNU: {selectedLand.properties.pnu}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 로딩 인디케이터 */}
+      {isLandLoading && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
         </div>
       )}
     </div>
