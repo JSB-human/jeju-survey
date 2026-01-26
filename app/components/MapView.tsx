@@ -5,13 +5,34 @@ import maplibregl from "maplibre-gl";
 import { ColumnLayer, PathLayer, ScatterplotLayer, TextLayer, GeoJsonLayer } from "@deck.gl/layers";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import "maplibre-gl/dist/maplibre-gl.css";
+import { Maximize2, Minimize2, Layers, Map as MapIcon, Navigation, Menu, X } from "lucide-react";
 
 import { ScenegraphLayer } from "@deck.gl/mesh-layers";
 import { TripsLayer } from "@deck.gl/geo-layers";
-import { PathStyleExtension } from "@deck.gl/extensions";
 
+
+import { load } from "@loaders.gl/core";
+import { GLTFLoader } from "@loaders.gl/gltf";
+import { DracoLoader } from "@loaders.gl/draco";
+
+// Three.js 관련 임포트
+import * as THREE from "three";
+// @ts-ignore
+import { GLTFLoader as ThreeGLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
+
+const STATIC_MODEL_URL = "/models/tng_farmer.glb"; // 원래는 뼈 없는 파일 권장
 
 const VWORLD_API_KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
+
+
+
+const FARMER_ANIM_SETTINGS = {
+  // 1. 와일드카드: 파일 내의 첫 번째 애니메이션 실행
+  '*': { speed: 1, playing: true },
+  
+  // 2. 구체적 이름: 콘솔에서 확인한 이름 지정 (우선순위 높음)
+  // 'wave': { speed: 1, playing: true }
+};
 
 interface MapData {
   id: string;
@@ -32,6 +53,7 @@ interface MapViewProps {
   useMobileLock?: boolean;
   onGeometryChange?: (area: number, boundary: number[][]) => void;
 }
+
 
 const DEFAULT_CENTER: [number, number] = [126.5000, 33.3500]; // 제주도 중앙
 
@@ -65,6 +87,12 @@ const MapView: React.FC<MapViewProps> = ({
   const [isPicking, setIsPicking] = useState<"start" | "end" | null>(null);
   const [mapMode, setMapMode] = useState<"satellite" | "standard">("satellite");
   const [isRouteControlsOpen, setIsRouteControlsOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  
+  // FAB 메뉴 상태
+  const [isFabOpen, setIsFabOpen] = useState(false);
+  // 나무 투명도 상태 (0~1)
+  const [treeOpacity, setTreeOpacity] = useState(1.0);
 
 
   // 선택된 땅(필지) 데이터 저장용
@@ -73,8 +101,56 @@ const MapView: React.FC<MapViewProps> = ({
 
 
   // 네비게이션 경로 애니메이션 시간
-  const [time, setTime] = useState(0);
-  const animationFrame = useRef<number>(0);
+  const [tripsTime, setTripsTime] = useState(0);
+  const [timer, setTimer] = useState(0); 
+
+  // 경로 데이터 존재 여부 추적 (불필요한 리렌더링 방지)
+  const hasRouteRef = useRef(false);
+  
+  // 상태가 바뀔 때마다 Ref도 최신화
+
+  useEffect(() => {
+    hasRouteRef.current = !!(routeGeoJson?.features?.length);
+  }, [routeGeoJson]);
+
+  
+
+  useEffect(() => {
+    let animationFrameId: number;
+    const animate = () => {
+      // 1. 경로 애니메이션 (데이터가 있을 때만 React State 업데이트)
+      if (hasRouteRef.current) {
+         setTripsTime((prev) => (prev + 0.5) % 100); 
+      }
+
+      setTimer((prev) => prev + 0.05);
+
+      // 2. MapLibre 강제 리페인트 (애니메이션 끊김 방지)
+      if (mapObjRef.current) {
+        if (mapObjRef.current.isStyleLoaded()) {
+           mapObjRef.current.triggerRepaint();
+        }
+      }
+
+      // 3. Deck.gl 강제 redraw (ScenegraphLayer 내부 애니메이션용)
+      if (deckOverlayRef.current) {
+         (deckOverlayRef.current as any)._deck?.redraw("animation-sync");
+      }
+
+      animationFrameId = requestAnimationFrame(animate);
+    };
+    
+    // 애니메이션 시작 전 약간의 지연
+    const timeoutId = setTimeout(() => {
+        animate();
+    }, 100);
+
+    return () => {
+        clearTimeout(timeoutId);
+        cancelAnimationFrame(animationFrameId);
+    };
+  }, []);
+
 
   const handleMapClick = async (info: any) => {
     // 나무나 마커를 클릭했을 땐 실행 X (땅을 클릭했을 때만)
@@ -102,15 +178,6 @@ const MapView: React.FC<MapViewProps> = ({
     }
   };
 
-
-  useEffect(() => {
-    const animate = () => {
-      setTime((t) => (t + 1) % 100); 
-      animationFrame.current = requestAnimationFrame(animate);
-    };
-    animationFrame.current = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(animationFrame.current);
-  }, []);
 
   const routeSummary = useMemo(() => {
     if (!routeGeoJson?.features?.length) return null;
@@ -150,190 +217,242 @@ const MapView: React.FC<MapViewProps> = ({
   }, [routeGeoJson]);
 
   useEffect(() => {
-    // 초기 로드 시에만 기본값 설정, 이후 초기화 시에는 재설정되지 않도록 함
-    if (data[0]?.coordinates && startPoint === undefined) {
+    // 초기 로드 시에만 기본값 설정 (데이터가 있고, 포인트가 설정되지 않았을 때)
+    if (data[0]?.coordinates && !startPoint) {
       setStartPoint(data[0].coordinates);
     }
-    if (data[1]?.coordinates && endPoint === undefined) {
+    if (data[1]?.coordinates && !endPoint) {
       setEndPoint(data[1].coordinates);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
 
   // Deck.gl 레이어 구성
-  const deckLayers = useMemo(
-    () => {
-      const layers: any[] = [
+  const staticLayers = useMemo(() => {
+    if (!data || data.length === 0) return [];
 
-        // 3D 나무 레이어
-        new (ScenegraphLayer as any)({
-          id: "farmland-trees",
-          data,
-          pickable: true,
-          scenegraph: "/models/orange_tree.glb",
+    const layers: any[] = [];
+    const farmerData = [data[0]];
+    const treeData = data.slice(1);
+
+    // 1. 나무 레이어
+    layers.push(
+      new (ScenegraphLayer as any)({
+        id: "farmland-trees",
+        data: treeData,
+        pickable: true,
+        scenegraph: "/models/orange_tree.glb",
+        getPosition: (d: any) => [d.coordinates.lng, d.coordinates.lat, 25],
+        getOrientation: (d: any) => [0, (d.coordinates.lng * 123456) % 360, 90],
+        sizeScale: 20,
+        _lighting: "pbr",
+        opacity: treeOpacity,
+        getScale: (d: MapData) => d.id === selectedId ? [1.5, 1.5, 1.5] : [1, 1, 1],
+        onClick: (info: { object?: MapData }) => {
+          if (info.object && onFeatureClick) onFeatureClick(info.object.id);
+        },
+      })
+    );
+
+    // 2. 텍스트 레이어
+    // layers.push(
+    //   new TextLayer({
+    //     id: "info-labels",
+    //     data,
+    //     pickable: true,
+    //     getPosition: (d: MapData) => [d.coordinates.lng, d.coordinates.lat],
+    //     getText: (d: MapData) => {
+    //       const treeCount = d.treeCount || Math.floor(Math.random() * 50) + 50;
+    //       return `${d.address || '알 수 없는 곳'}\n🌲 ${treeCount}본`;
+    //     },
+    //     getSize: 14,
+    //     getColor: [255, 255, 255],
+    //     getPixelOffset: [0, 50],
+    //     background: true,
+    //     getBackgroundColor: [0, 0, 0, 160],
+    //     backgroundPadding: [8, 4],
+    //     fontFamily: '"Pretendard", "Malgun Gothic", sans-serif',
+    //     fontWeight: 700,
+    //     characterSet: "auto",
+    //     billboard: true,
+    //   })
+    // );
+
+
+    // 3. 👨‍🌾 농부 레이어 (안전 모드: 일단 보이게 하기)
+    // if (farmerData.length > 0) {
+    //   layers.push(
+    //     new ScatterplotLayer({
+    //       id: "farmer-hitbox",
+    //       data: farmerData,
+    //       pickable: true, // 🚨 얘는 마우스 감지 켜기
+    //       opacity: 0,     // 🚨 눈에는 안 보임 (투명)
+    //       radiusScale: 1,
+    //       radiusMinPixels: 20, // 마우스 대기 편하게 넉넉한 크기
+    //       getPosition: (d: any) => [d.coordinates.lng, d.coordinates.lat],
+    //       getFillColor: [0, 0, 0],
           
-          getPosition: (d: any) => [
-            d.coordinates.lng, 
-            d.coordinates.lat, 
-            // 나무 높이보다 살짝 높게 설정 (예: 20미터 위)
-            // 나무 모델 사이즈(sizeScale)가 20이라면 그보다 조금 더 높게 잡으세요.
-            25 
-          ],
-          getOrientation: (d: MapData) => [0, Math.random() * 360, 90],
-          sizeScale: 20, 
+    //       // 호버 이벤트는 여기서 처리!
+    //       onHover: (info: any) => {
+    //         if (info.object) {
+    //           setHoveredInfo({
+    //             id: info.object.id,
+    //             coords: [info.object.coordinates.lng, info.object.coordinates.lat]
+    //           });
+    //         } else {
+    //           setHoveredInfo(null);
+    //         }
+    //       }
+    //     })
+    //   );
+    // }
+
+    // 3-2. 👨‍🌾 농부 레이어 (보여주기용)
+    // 얘는 마우스 감지를 끄고, 히트박스의 신호에 따라 숨기만 합니다.
+    if (farmerData.length > 0) {
+      layers.push(
+        new ScenegraphLayer({
+          id: "static-farmers",
+          data: farmerData,
+          scenegraph: STATIC_MODEL_URL,
+          
+          loaders: [GLTFLoader],
+          loadOptions: { gltf: { postProcess: true } },
+    
+          pickable: true, // 🚨 중요: 얘는 마우스 감지 끄기 (무한루프 방지)
+          sizeScale: 60,
+          
+          getPosition: (d: any) => [d.coordinates.lng, d.coordinates.lat],
+          getOrientation: [0, 0, 90],
           _lighting: "pbr",
-          
-          getScale: (d: MapData) => d.id === selectedId ? [1.5, 1.5, 1.5] : [1, 1, 1],
-   
+
           onClick: (info: { object?: MapData }) => {
-            if (info.object && onFeatureClick) onFeatureClick(info.object.id);
+            if (info.object) {
+              alert('');
+              // 여기에 원하는 로직(모달 열기 등)을 넣으세요.
+            }
           },
         }),
 
         new TextLayer({
-          id: "info-labels",
-          data,
+          id: "quest-mark",
+          data: farmerData, 
           pickable: true,
-          // 나무 위치와 동일하게 잡음
-          getPosition: (d: MapData) => [d.coordinates.lng, d.coordinates.lat],
           
-          // 📝 표시할 텍스트 (지명 + 나무 본수)
-          getText: (d: MapData) => {
-            // 데이터에 treeCount가 없으면 임의로 50~100 사이 숫자로 가정
-            const treeCount = d.treeCount || Math.floor(Math.random() * 50) + 50; 
-            // 줄바꿈(\n)을 써서 두 줄로 표시
-            return `${d.address || '알 수 없는 곳'}\n🌲 ${treeCount}본`;
-          },
+          // 🚨 [포인트] tripsTime(0~100)을 활용하여 높이(Z)에 애니메이션 적용
+          // Math.sin을 사용하면 아주 부드러운 상하 운동을 합니다.
+          getPosition: (d: any) => [
+            d.coordinates.lng, 
+            d.coordinates.lat, 
+            120 + (Math.sin(timer) * 10)
+          ], 
           
-          // 스타일링
-          getSize: 14,
-          getColor: [255, 255, 255], // 흰색 글씨
+          getText: (d: any) => "!", 
           
-          // 🚀 위치 조정 (나무 꼭대기 위로 띄우기)
-          getPixelOffset: [0, 50], // Y축으로 -50픽셀 위로 올림
+          // 기준점 설정 (중앙 하단)
+          getTextAnchor: 'middle',
+          getAlignmentBaseline: 'bottom',
           
-          // 배경 박스 (가독성 UP)
-          background: true,
-          getBackgroundColor: [0, 0, 0, 160], // 반투명 검은색 (R, G, B, Alpha)
-          backgroundPadding: [8, 4], // 여백 [가로, 세로]
+          // 폰트 스타일 (와우 느낌 극대화)
+          getSize: 50,
+          getColor: [255, 215, 0], // 황금색
+          fontFamily: '"Arial Black", "Impact", sans-serif',
+          fontWeight: 900,
+          outlineWidth: 5, // 테두리를 더 두껍게 해서 가독성 확보
+          outlineColor: [40, 20, 0], // 진한 갈색/검정 테두리
           
-          // 폰트 설정
-          fontFamily: '"Pretendard", "Malgun Gothic", sans-serif',
-          fontWeight: 700,
+          billboard: true, 
           
-          // ⭐ 중요: 한글 깨짐 방지
-          characterSet: "auto", 
-          
-          // 빌보드 효과 (지도를 돌려도 글자는 항상 정면을 봄)
-          billboard: true,
-          
-          // 겹침 방지 (선택 사항: 글자가 너무 많으면 켜세요)
-          // collisionEnabled: true, 
+          updateTriggers: {
+            getPosition: [timer]
+          }
         }),
-      ];
+      );
+    }
 
-      if (selectedLand) {
+    // 4. 선택된 땅 (GeoJson)
+    if (selectedLand) {
+         layers.push(
+            new GeoJsonLayer({
+                id: "selected-land-polygon",
+                data: selectedLand,
+                pickable: true,
+                stroked: true,
+                filled: true,
+                extruded: false,
+                getFillColor: mapMode === "standard" ? [0, 219, 127, 20] : [245, 219, 127, 20], 
+                getLineColor: mapMode === "standard" ? [0, 219, 127, 255] : [245, 219, 127, 255], 
+                getLineWidth: 2,
+                lineWidthMinPixels: 2,
+                lineJointRounded: true,
+                lineCapRounded: true,
+                parameters: { depthTest: false },
+                getPolygonOffset: ({ layerIndex }: { layerIndex: number }) => [0, -layerIndex * 100],
+              })
+        )
+    }
+
+    return layers;
+  }, [data, selectedId, onFeatureClick, treeOpacity, selectedLand, mapMode, tripsTime, routeGeoJson, tripsData, timer]);
+
+
+  // ⚡ [Step 2] 동적 레이어 (time에 따라 계속 변하는 애들: 경로 애니메이션)
+  const animatedLayers = useMemo(() => {
+    const layers: any[] = [];
+
+    if (tripsData.length > 0) {
+        // 배경 라인
         layers.push(
-          new GeoJsonLayer({
-            id: "selected-land-polygon",
-            data: selectedLand,
+            new PathLayer({
+                id: "route-base",
+                data: routeGeoJson?.features.filter((f: any) => f.geometry.type === "LineString"),
+                getPath: (d: any) => d.geometry.coordinates,
+                getColor: [245, 73, 39], 
+                getWidth: 10,
+                widthMinPixels: 2, 
+                capRounded: true,
+                jointRounded: true,
+              } as any)
+        );
+
+        // 움직이는 펄스 (TripsLayer)
+        layers.push(
+            new (TripsLayer as any)({
+                id: "route-pulse",
+                data: tripsData,
+                getPath: (d: any) => d.path,
+                getTimestamps: (d: any) => d.timestamps,
+                getColor: [0, 0, 0], 
+                opacity: 1,
+                widthMinPixels: 5,
+                rounded: true,
+                trailLength: 30, 
+                currentTime: tripsTime, // 👈 얘는 time이 필요함!
+                shadowEnabled: false,
+                parameters: {
+                  blend: true,
+                  blendFunc: ["ONE", "ONE"],
+                }
+              } as any)
+        );
+    }
+    
+     // 경로 레이어 (PathLayer)
+      if (routePathData.length > 0) {
+        layers.push(
+          new PathLayer({
+            id: "route-path",
+            data: routePathData,
+            getPath: (d: any) => d.path,
+            getColor: [255, 107, 0, 200], // 오렌지 네온
+            getWidth: 10,
+            widthMinPixels: 4,
+            capRounded: true,
+            jointRounded: true,
             pickable: true,
-            stroked: true,
-            filled: true,
-            extruded: false,
-            
-            // 🚀 [수정 포인트 1] 면 색상: 보라색 대신 '아주 희미한 청록색'
-            // 투명도(맨 뒤 숫자)를 20~30 정도로 아주 낮춰서, 
-            // 땅의 위성 사진이 그대로 비치면서 살짝 '선택된 느낌'만 줍니다.
-            getFillColor: mapMode === "standard" ? [0, 219, 127, 20] : [245, 219, 127, 20], 
-
-            // 🚀 [수정 포인트 2] 선 색상: '완전한 형광 Cyan'
-            // 알파값을 255로 꽉 채워서 빛나는 느낌을 줍니다.
-            getLineColor: mapMode === "standard" ? [0, 219, 127, 255] : [245, 219, 127, 255], 
-
-            // 🚀 [수정 포인트 3] 두께: 얇고 예리하게
-            // 굵으면 촌스럽습니다. 2~3픽셀로 얇게 그리는 게 훨씬 세련됩니다.
-            getLineWidth: 2,
-            lineWidthMinPixels: 2,
-            
-            // 🚀 [수정 포인트 4] 점선 제거 & 부드러운 마감
-            // 점선(dash) 확장을 빼버리고, 모서리를 둥글게 처리합니다.
-            lineJointRounded: true,
-            lineCapRounded: true,
-
-            // ✨ [꿀팁] 지형이랑 겹쳐서 깜빡거리는 현상(Z-fighting) 방지
-            // 폴리곤을 카메라 쪽으로 아주 살짝 띄웁니다.
-            parameters: {
-              depthTest: false, // 혹은 getPolygonOffset 사용
-            },
-             // 만약 depthTest: false가 너무 떠 보이면 아래 옵션 사용
-            getPolygonOffset: ({ layerIndex }: { layerIndex: number }) => [0, -layerIndex * 100],
           })
         );
       }
-
-      if (tripsData.length > 0) {
-      
-        // (A) 베이스 라인: 희미한 전선 (길이 어디 있는지 알려줌)
-        layers.push(
-          new PathLayer({
-            id: "route-base",
-            data: routeGeoJson?.features.filter((f: any) => f.geometry.type === "LineString"),
-            getPath: (d: any) => d.geometry.coordinates,
-            getColor: [245, 73, 39], 
-            getWidth: 10,
-            widthMinPixels: 2, 
-            capRounded: true,
-            jointRounded: true,
-          } as any)
-        );
-  
-        // (B) 에너지 흐름: 빛나는 네온 펄스
-        layers.push(
-          new (TripsLayer as any)({
-            id: "route-pulse",
-            data: tripsData,
-            getPath: (d: any) => d.path,
-            getTimestamps: (d: any) => d.timestamps,
-            getColor: [0, 0, 0], 
-            opacity: 1,
-            widthMinPixels: 5, // 베이스보다 살짝 얇게 해서 가운데가 빛나는 느낌
-            rounded: true,
-            
-            // ✨ 꼬리 길이 (길수록 스피디해 보임)
-            trailLength: 30, 
-            
-            currentTime: time,
-            shadowEnabled: false,
-            
-            // ✨ 빛나는 효과의 핵심 (Additive Blending)
-            // 배경이 어두울수록 빛이 더 강렬하게 보입니다.
-            parameters: {
-              blend: true,
-              blendFunc: ["ONE", "ONE"], // WebGL Additive Blending 상수
-            }
-          } as any)
-        );
-      }
-
-
-
-      // 경로 레이어 (PathLayer)
-      // if (routePathData.length > 0) {
-      //   layers.push(
-      //     new PathLayer({
-      //       id: "route-path",
-      //       data: routePathData,
-      //       getPath: (d: any) => d.path,
-      //       getColor: [255, 107, 0, 200], // 오렌지 네온
-      //       getWidth: 10,
-      //       widthMinPixels: 4,
-      //       capRounded: true,
-      //       jointRounded: true,
-      //       pickable: true,
-      //     })
-      //   );
-      // }
 
       // 출발/도착 마커 (IconLayer) - 핀 모양
       const pointsData = [];
@@ -399,9 +518,13 @@ const MapView: React.FC<MapViewProps> = ({
       }
 
       return layers;
-    },
-    [data, selectedId, onFeatureClick, tripsData, time, routeGeoJson, startPoint, endPoint, routeSummary]
-  );
+  }, [routeGeoJson, tripsData, tripsTime, startPoint, endPoint, routePathData, routeSummary]); 
+
+
+  // 🔗 [Step 3] 최종 합체
+  const deckLayers = useMemo(() => {
+      return [...staticLayers, ...animatedLayers];
+  }, [staticLayers, animatedLayers]);
 
   // 2. MapLibre 스타일: VWorld + 테슬라 감성 옵션
   const mapStyle = useMemo<maplibregl.StyleSpecification>(() => {
@@ -496,7 +619,10 @@ const MapView: React.FC<MapViewProps> = ({
     });
 
     // 3. Deck.gl 오버레이 연결
-    const deckOverlay = new MapboxOverlay({ layers: deckLayers, onClick: handleMapClick, });
+    const deckOverlay = new MapboxOverlay({
+      layers: deckLayers,
+      onClick: handleMapClick,
+    });
     map.addControl(deckOverlay as any);
     deckOverlayRef.current = deckOverlay;
     mapObjRef.current = map;
@@ -525,14 +651,23 @@ const MapView: React.FC<MapViewProps> = ({
   // 스타일 동적 변경
   useEffect(() => {
     if (mapObjRef.current) {
-      mapObjRef.current.setStyle(mapStyle);
+        // 스타일이 로드되지 않았거나, 업데이트 중일 땐 건너뜀
+        if (!mapObjRef.current.isStyleLoaded()) return;
+        
+        try {
+            // 단순 객체 비교는 어려우므로, mapMode가 바뀔 때만 실행되도록 로직 위임 (deps에 mapStyle이 있으므로)
+            // 하지만 mapStyle이 계속 새 객체로 생성되므로, 여기서는 최대한 에러를 무시하고 넘깁니다.
+            mapObjRef.current.setStyle(mapStyle); 
+        } catch (e) {
+            // 무시 (Rebuilding style... 에러 방지)
+        }
     }
   }, [mapStyle]);
 
   // 데이터 변경 시 deck.gl 레이어 동기화
   useEffect(() => {
     if (deckOverlayRef.current) {
-      deckOverlayRef.current.setProps({ layers: deckLayers });
+      deckOverlayRef.current.setProps({ _animate: true,  layers: deckLayers });
     }
   }, [deckLayers]);
 
@@ -636,44 +771,89 @@ const MapView: React.FC<MapViewProps> = ({
   };
 
   return (
-    <div className={`group relative overflow-hidden bg-white ${className ?? ""}`}>
+    <div className={`group relative overflow-hidden bg-white ${isFullscreen ? "fixed inset-0 z-100 w-screen h-dvh" : (className ?? "")}`}>
+      {/* 전체화면 토글 버튼 (좌측 상단) */}
+      <button
+        type="button"
+        onClick={() => setIsFullscreen(!isFullscreen)}
+        className="absolute top-4 left-4 z-40 p-3 bg-white/80 backdrop-blur-md border border-slate-200 rounded-2xl shadow-xl text-slate-700 hover:bg-white active:scale-95 transition-all"
+        aria-label={isFullscreen ? "전체화면 종료" : "전체화면으로 보기"}
+      >
+        {isFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+      </button>
+
       {/* 테슬라 스타일 비네팅 오버레이 (선택 사항) */}
       <div className="absolute inset-0 pointer-events-none z-10 shadow-[inset_0_0_150px_rgba(0,0,0,0.2)]" />
       <div ref={mapRef} className="w-full h-full" />
 
-      {/* 상단 우측 지도 모드 토글 (플로팅) */}
-      <div className="absolute top-4 right-4 z-20 flex flex-col gap-2 items-end">
+      {/* 우측 상단 FAB 메뉴 (통합 컨트롤) */}
+      <div className="absolute top-4 right-4 z-50 flex flex-col items-end gap-3">
+        
+        {/* 메인 FAB 버튼 */}
         <button
           type="button"
-          onClick={() => setMapMode(prev => prev === "satellite" ? "standard" : "satellite")}
-          className="px-3 py-2 rounded-xl bg-white/90 backdrop-blur-md border border-slate-200 text-xs font-bold text-slate-700 shadow-lg hover:bg-white transition-all whitespace-nowrap flex items-center gap-2"
-        >
-          {mapMode === "satellite" ? (
-            <>
-              <div className="w-2 h-2 rounded-full bg-emerald-500" />
-              일반지도 보기
-            </>
-          ) : (
-            <>
-              <div className="w-2 h-2 rounded-full bg-blue-500" />
-              위성지도 보기
-            </>
-          )}
-        </button>
-
-        {/* 경로 예측 도구 토글 버튼 */}
-        <button
-          type="button"
-          onClick={() => setIsRouteControlsOpen(!isRouteControlsOpen)}
-          className={`px-3 py-2 rounded-xl backdrop-blur-md border text-xs font-bold shadow-lg transition-all whitespace-nowrap flex items-center gap-2 ${
-            isRouteControlsOpen 
-              ? "bg-orange-500 border-orange-600 text-white"
-              : "bg-white/90 border-slate-200 text-slate-700 hover:bg-white"
+          onClick={() => setIsFabOpen(!isFabOpen)}
+          className={`w-12 h-12 rounded-full shadow-xl flex items-center justify-center transition-all duration-300 backdrop-blur-md border ${
+            isFabOpen 
+              ? "bg-slate-800 text-white rotate-90 border-slate-700" 
+              : "bg-white/90 text-slate-800 hover:bg-white border-slate-200"
           }`}
         >
-          <div className={`w-2 h-2 rounded-full ${isRouteControlsOpen ? "bg-white" : "bg-orange-500"}`} />
-          {isRouteControlsOpen ? "경로 도구 닫기" : "경로 예측 도구"}
+          {isFabOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
         </button>
+
+        {/* 메뉴 확장 시 나타나는 컨트롤들 */}
+        {isFabOpen && (
+          <div className="flex flex-col gap-3 animate-in slide-in-from-top-5 duration-300 items-end origin-top-right">
+            
+            {/* 1. 지도 모드 토글 */}
+            <button
+              type="button"
+              onClick={() => setMapMode(prev => prev === "satellite" ? "standard" : "satellite")}
+              className="px-4 py-2.5 bg-white/90 backdrop-blur-md rounded-2xl shadow-lg border border-slate-200 text-slate-700 text-xs font-bold hover:bg-white flex items-center gap-2 transition-all w-full justify-end min-w-[140px]"
+            >
+              <span className="flex-1 text-right">{mapMode === "satellite" ? "일반지도" : "위성지도"}</span>
+              {mapMode === "satellite" ? (
+                <div className="p-1 rounded-full bg-emerald-100 text-emerald-600"><MapIcon className="w-3.5 h-3.5" /></div>
+              ) : (
+                <div className="p-1 rounded-full bg-blue-100 text-blue-600"><Layers className="w-3.5 h-3.5" /></div>
+              )}
+            </button>
+
+            {/* 2. 경로 도구 토글 */}
+            <button
+              type="button"
+              onClick={() => setIsRouteControlsOpen(!isRouteControlsOpen)}
+              className={`px-4 py-2.5 rounded-2xl backdrop-blur-md border shadow-lg text-xs font-bold transition-all flex items-center gap-2 w-full justify-end min-w-[140px] ${
+                isRouteControlsOpen 
+                  ? "bg-orange-500 border-orange-600 text-white" 
+                  : "bg-white/90 border-slate-200 text-slate-700 hover:bg-white"
+              }`}
+            >
+              <span className="flex-1 text-right">{isRouteControlsOpen ? "도구 닫기" : "경로 예측"}</span>
+              <div className={`p-1 rounded-full ${isRouteControlsOpen ? "bg-white/20" : "bg-orange-100 text-orange-600"}`}>
+                <Navigation className="w-3.5 h-3.5" />
+              </div>
+            </button>
+
+            {/* 3. 나무 투명도 조절 (슬라이더) */}
+            <div className="p-4 bg-white/90 backdrop-blur-md rounded-2xl shadow-lg border border-slate-200 flex flex-col gap-2 min-w-[160px]">
+              <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 uppercase">
+                <span>나무 투명도</span>
+                <span className="bg-slate-100 px-1.5 py-0.5 rounded text-slate-700">{Math.round(treeOpacity * 100)}%</span>
+              </div>
+              <input 
+                type="range" 
+                min="0" 
+                max="1" 
+                step="0.1" 
+                value={treeOpacity}
+                onChange={(e) => setTreeOpacity(parseFloat(e.target.value))}
+                className="w-full h-1.5 bg-slate-200 rounded-full appearance-none cursor-pointer accent-emerald-500"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 안내 메시지 (픽킹 모드일 때) */}
@@ -748,36 +928,68 @@ const MapView: React.FC<MapViewProps> = ({
       )}
 
 
-      {/* 선택된 땅(필지) 정보 표시 */}
+      {/* 선택된 땅(필지) 정보 표시 - 카드 UI 개선 (하단 배치) */}
       {selectedLand && (
-        <div className="absolute top-20 left-4 z-30 w-64 animate-in slide-in-from-left duration-300">
-          <div className="bg-black/80 backdrop-blur-md border border-slate-600 p-4 rounded-2xl shadow-2xl text-white">
-            <div className="flex justify-between items-start mb-2">
-              <h3 className="text-sm font-bold text-emerald-400">{selectedLand.properties.addr}</h3>
+        <div 
+          className={`absolute left-4 z-30 w-[calc(100%-32px)] max-w-sm animate-in slide-in-from-bottom duration-300 transition-all ${
+            isRouteControlsOpen ? "bottom-24" : "bottom-6"
+          }`}
+        >
+          <div className="bg-white/90 backdrop-blur-xl border border-white/40 p-5 rounded-4xl shadow-2xl text-slate-800 relative overflow-hidden group">
+            
+            {/* 배경 장식 */}
+            <div className="absolute top-0 right-0 w-32 h-32 bg-linear-to-br from-emerald-100/50 to-orange-100/50 rounded-bl-[4rem] -z-10" />
+            
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <span className="inline-block px-2 py-1 rounded-lg bg-slate-100 text-[10px] font-black text-slate-500 mb-1">
+                  선택된 필지 정보
+                </span>
+                <h3 className="text-lg font-black text-slate-800 leading-tight">
+                  {selectedLand.properties.addr || "주소 정보 없음"}
+                </h3>
+              </div>
               <button 
                 onClick={() => setSelectedLand(null)}
-                className="text-slate-400 hover:text-white"
-              >✕</button>
+                className="p-2 bg-slate-100 hover:bg-slate-200 rounded-full text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
             
-            <div className="space-y-2 text-xs">
-              <div className="flex justify-between border-b border-slate-700 pb-1">
-                <span className="text-slate-400">지번</span>
-                <span className="font-bold">{selectedLand.properties.jibun}</span>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white border border-slate-100 flex items-center justify-center shadow-sm text-lg">
+                    📍
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase">지번</span>
+                    <span className="text-sm font-black text-slate-700 font-mono">{selectedLand.properties.jibun}</span>
+                  </div>
+                </div>
               </div>
-              {/* <div className="flex justify-between border-b border-slate-700 pb-1">
-                <span className="text-slate-400">지목</span>
-                <span className="font-bold">{selectedLand.properties.jimok}</span>
-              </div> */}
-              <div className="flex justify-between border-b border-slate-700 pb-1">
-                <span className="text-slate-400">기준년월</span>
-                <span className="font-bold text-orange-400">
-                  {/* 브이월드 데이터에 면적이 있다면 표시, 없으면 계산 */}
-                  {selectedLand.properties.pnu ? selectedLand.properties.gosi_year + "년 " + selectedLand.properties.gosi_month + "월" : "-"} 
+
+              <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-100">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white border border-slate-100 flex items-center justify-center shadow-sm text-lg">
+                    📅
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase">공시지가 기준년월</span>
+                    <span className="text-sm font-black text-slate-700">
+                      {selectedLand.properties.pnu 
+                        ? `${selectedLand.properties.gosi_year}년 ${selectedLand.properties.gosi_month}월` 
+                        : "-"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex justify-end pt-1">
+                <span className="text-[10px] font-mono text-slate-400 bg-slate-50 px-2 py-1 rounded-lg">
+                  PNU: {selectedLand.properties.pnu}
                 </span>
-              </div>
-              <div className="mt-2 text-[10px] text-slate-500 font-mono">
-                PNU: {selectedLand.properties.pnu}
               </div>
             </div>
           </div>

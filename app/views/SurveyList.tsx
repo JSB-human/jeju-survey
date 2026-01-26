@@ -94,7 +94,7 @@ const SurveyList: React.FC<SurveyListProps> = ({ onSelect }) => {
         />
 
         {selectedId && (
-          <div className="absolute bottom-4 left-4 right-4 md:right-auto md:top-6 md:left-6 z-20 md:w-72 animate-in slide-in-from-bottom duration-300">
+          <div className="absolute bottom-4 left-4 right-4 md:right-auto md:top-20 md:left-6 z-20 md:w-72 animate-in slide-in-from-bottom duration-300">
             {(() => {
               const s = MOCK_SURVEYS.find((i) => i.id === selectedId);
               if (!s) return null;

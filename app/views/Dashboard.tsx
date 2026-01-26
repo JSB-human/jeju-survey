@@ -2,6 +2,7 @@
 
 import React from "react";
 import { Info, ChevronRight } from "lucide-react";
+import InstallPrompt from "../components/InstallPrompt";
 
 const Dashboard: React.FC = () => {
   const stats = [
@@ -14,6 +15,7 @@ const Dashboard: React.FC = () => {
   return (
     <div className="max-w-5xl mx-auto py-6 md:py-10 px-4 md:px-8 space-y-8 md:space-y-12 animate-in fade-in slide-in-from-top-2 duration-700 pb-28 md:pb-10">
       <header className="space-y-3 px-1">
+        <InstallPrompt />
         <h1 className="text-3xl md:text-4xl font-black tracking-tight text-[#37352f]">
           대시보드
         </h1>

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 const VWORLD_KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
+const DOMAIN = process.env.NEXT_PUBLIC_DOMAIN;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -18,7 +19,7 @@ export async function GET(request: Request) {
     `&request=GetFeature` +
     `&data=LP_PA_CBND_BUBUN` + // 92번 API (연속지적도)
     `&key=${VWORLD_KEY}` +
-    `&domain=localhost` +
+    `&domain=${DOMAIN}` +
     `&format=json` +           // JSON으로 주세요
     `&geomFilter=POINT(${lng} ${lat})` + // 👈 "이 좌표를 포함하는 땅을 찾아라"
     `&geometry=true` +         // 땅 모양(Polygon)도 같이 줘
