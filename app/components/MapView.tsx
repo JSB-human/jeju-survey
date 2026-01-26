@@ -10,15 +10,7 @@ import { Maximize2, Minimize2, Layers, Map as MapIcon, Navigation, Menu, X } fro
 import { ScenegraphLayer } from "@deck.gl/mesh-layers";
 import { TripsLayer } from "@deck.gl/geo-layers";
 
-
-import { load } from "@loaders.gl/core";
 import { GLTFLoader } from "@loaders.gl/gltf";
-import { DracoLoader } from "@loaders.gl/draco";
-
-// Three.js 관련 임포트
-import * as THREE from "three";
-// @ts-ignore
-import { GLTFLoader as ThreeGLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 
 const STATIC_MODEL_URL = "/models/tng_farmer.glb"; // 원래는 뼈 없는 파일 권장
 
