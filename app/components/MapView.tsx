@@ -12,6 +12,8 @@ import { TripsLayer } from "@deck.gl/geo-layers";
 
 import { GLTFLoader } from "@loaders.gl/gltf";
 
+import nipplejs from 'nipplejs';
+
 const STATIC_MODEL_URL = "/models/tng_farmer.glb"; // 원래는 뼈 없는 파일 권장
 
 const VWORLD_API_KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
@@ -98,6 +100,137 @@ const MapView: React.FC<MapViewProps> = ({
 
   // 경로 데이터 존재 여부 추적 (불필요한 리렌더링 방지)
   const hasRouteRef = useRef(false);
+
+  const [viewState, setViewState] = useState({
+    longitude: 126.5000,
+    latitude: 33.3500,
+    zoom: 16,
+    pitch: 60,
+    bearing: -15,
+  });
+
+  const leftJoystickRef = useRef<HTMLDivElement>(null);
+  const rightJoystickRef = useRef<HTMLDivElement>(null);
+  const leftJoystickManagerRef = useRef<any>(null);
+  const rightJoystickManagerRef = useRef<any>(null);
+
+  // 🎮 조이스틱 초기화 (전체화면일 때만)
+  useEffect(() => {
+    if (!isFullscreen || !mapObjRef.current) {
+      // 전체화면이 아니면 조이스틱 제거
+      if (leftJoystickManagerRef.current) {
+        leftJoystickManagerRef.current.destroy();
+        leftJoystickManagerRef.current = null;
+      }
+      if (rightJoystickManagerRef.current) {
+        rightJoystickManagerRef.current.destroy();
+        rightJoystickManagerRef.current = null;
+      }
+      return;
+    }
+
+    if (!leftJoystickRef.current || !rightJoystickRef.current) return;
+    const map = mapObjRef.current;
+
+    // 🎮 [왼쪽 조이스틱] - 지도 이동
+    const leftManager = nipplejs.create({
+      zone: leftJoystickRef.current,
+      mode: 'static',
+      position: { left: '50%', bottom: '50%' },
+      color: 'rgba(255, 255, 255, 0.9)',
+      size: 120,
+      threshold: 0.1,
+      fadeTime: 200,
+      restOpacity: 0.6,
+    });
+
+    let moveAnimationFrame: number | null = null;
+    leftManager.on('move', (evt, data) => {
+      if (moveAnimationFrame) cancelAnimationFrame(moveAnimationFrame);
+      
+      moveAnimationFrame = requestAnimationFrame(() => {
+        const bearing = map.getBearing();
+        const bearingRad = (bearing * Math.PI) / 180;
+        
+        // 조이스틱 강도에 따른 이동 속도 (더 부드럽게)
+        const intensity = Math.min(data.distance / 50, 1); // 0~1 정규화
+        const moveX = data.vector.x * 0.00015 * intensity;
+        const moveY = data.vector.y * 0.00015 * intensity;
+
+        const center = map.getCenter();
+        const lon = center.lng + (moveX * Math.cos(bearingRad) + moveY * Math.sin(bearingRad));
+        const lat = center.lat + (moveY * Math.cos(bearingRad) - moveX * Math.sin(bearingRad));
+
+        map.easeTo({ 
+          center: [lon, lat],
+          duration: 0,
+        });
+      });
+    });
+
+    leftManager.on('end', () => {
+      if (moveAnimationFrame) {
+        cancelAnimationFrame(moveAnimationFrame);
+        moveAnimationFrame = null;
+      }
+    });
+
+    // 🎮 [오른쪽 조이스틱] - 지도 회전 및 기울기
+    const rightManager = nipplejs.create({
+      zone: rightJoystickRef.current,
+      mode: 'static',
+      position: { right: '50%', bottom: '50%' },
+      color: 'rgba(255, 215, 0, 0.9)',
+      size: 120,
+      threshold: 0.1,
+      fadeTime: 200,
+      restOpacity: 0.6,
+    });
+
+    let rotateAnimationFrame: number | null = null;
+    rightManager.on('move', (evt, data) => {
+      if (rotateAnimationFrame) cancelAnimationFrame(rotateAnimationFrame);
+      
+      rotateAnimationFrame = requestAnimationFrame(() => {
+        const currentPitch = map.getPitch();
+        const currentBearing = map.getBearing();
+
+        // 조이스틱 강도에 따른 회전 속도
+        const intensity = Math.min(data.distance / 50, 1);
+        const nextBearing = currentBearing + data.vector.x * 2.5 * intensity;
+        const nextPitch = Math.min(
+          Math.max(currentPitch + data.vector.y * 1.5 * intensity, 0), 
+          85
+        );
+
+        map.easeTo({ 
+          bearing: nextBearing,
+          pitch: nextPitch,
+          duration: 0,
+        });
+      });
+    });
+
+    rightManager.on('end', () => {
+      if (rotateAnimationFrame) {
+        cancelAnimationFrame(rotateAnimationFrame);
+        rotateAnimationFrame = null;
+      }
+    });
+
+    leftJoystickManagerRef.current = leftManager;
+    rightJoystickManagerRef.current = rightManager;
+
+    return () => {
+      if (moveAnimationFrame) cancelAnimationFrame(moveAnimationFrame);
+      if (rotateAnimationFrame) cancelAnimationFrame(rotateAnimationFrame);
+      leftManager.destroy();
+      rightManager.destroy();
+      leftJoystickManagerRef.current = null;
+      rightJoystickManagerRef.current = null;
+    };
+  }, [isFullscreen]);
+  
   
   // 상태가 바뀔 때마다 Ref도 최신화
 
@@ -777,6 +910,43 @@ const MapView: React.FC<MapViewProps> = ({
       {/* 테슬라 스타일 비네팅 오버레이 (선택 사항) */}
       <div className="absolute inset-0 pointer-events-none z-10 shadow-[inset_0_0_150px_rgba(0,0,0,0.2)]" />
       <div ref={mapRef} className="w-full h-full" />
+
+      {/* 🎮 조이스틱 컨트롤 (전체화면일 때만 표시) */}
+      {isFullscreen && (
+        <div className="absolute inset-0 pointer-events-none z-50">
+          <div className="flex justify-between items-end w-full h-full p-6 md:p-10">
+            {/* 왼쪽 조이스틱 - 지도 이동 */}
+            <div className="flex flex-col items-center gap-2">
+              <div 
+                ref={leftJoystickRef} 
+                className="w-32 h-32 pointer-events-auto flex items-center justify-center relative"
+              >
+                {/* 조이스틱 배경 원형 가이드 */}
+                <div className="absolute inset-0 rounded-full border-2 border-white/30 bg-black/20 backdrop-blur-sm" />
+                {/* 레이블 */}
+                <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-white text-xs font-bold bg-black/50 px-2 py-1 rounded backdrop-blur-sm whitespace-nowrap">
+                  이동
+                </div>
+              </div>
+            </div>
+            
+            {/* 오른쪽 조이스틱 - 시점 조절 */}
+            <div className="flex flex-col items-center gap-2">
+              <div 
+                ref={rightJoystickRef} 
+                className="w-32 h-32 pointer-events-auto flex items-center justify-center relative"
+              >
+                {/* 조이스틱 배경 원형 가이드 */}
+                <div className="absolute inset-0 rounded-full border-2 border-amber-400/30 bg-black/20 backdrop-blur-sm" />
+                {/* 레이블 */}
+                <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-white text-xs font-bold bg-black/50 px-2 py-1 rounded backdrop-blur-sm whitespace-nowrap">
+                  시점
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 우측 상단 FAB 메뉴 (통합 컨트롤) */}
       <div className="absolute top-4 right-4 z-50 flex flex-col items-end gap-3">
