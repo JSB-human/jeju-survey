@@ -12,8 +12,6 @@ import { TripsLayer } from "@deck.gl/geo-layers";
 
 import { GLTFLoader } from "@loaders.gl/gltf";
 
-import nipplejs from 'nipplejs';
-
 const STATIC_MODEL_URL = "/models/tng_farmer.glb"; // 원래는 뼈 없는 파일 권장
 
 const VWORLD_API_KEY = process.env.NEXT_PUBLIC_VWORLD_KEY;
@@ -132,102 +130,115 @@ const MapView: React.FC<MapViewProps> = ({
     if (!leftJoystickRef.current || !rightJoystickRef.current) return;
     const map = mapObjRef.current;
 
-    // 🎮 [왼쪽 조이스틱] - 지도 이동
-    const leftManager = nipplejs.create({
-      zone: leftJoystickRef.current,
-      mode: 'static',
-      position: { left: '50%', bottom: '50%' },
-      color: 'rgba(255, 255, 255, 0.9)',
-      size: 120,
-      threshold: 0.1,
-      fadeTime: 200,
-      restOpacity: 0.6,
-    });
-
-    let moveAnimationFrame: number | null = null;
-    leftManager.on('move', (evt, data) => {
-      if (moveAnimationFrame) cancelAnimationFrame(moveAnimationFrame);
-      
-      moveAnimationFrame = requestAnimationFrame(() => {
-        const bearing = map.getBearing();
-        const bearingRad = (bearing * Math.PI) / 180;
+    // 🎮 nipplejs 동적 import (클라이언트 사이드에서만)
+    const initJoysticks = async () => {
+      try {
+        const nipplejs = (await import('nipplejs')).default;
         
-        // 조이스틱 강도에 따른 이동 속도 (더 부드럽게)
-        const intensity = Math.min(data.distance / 50, 1); // 0~1 정규화
-        const moveX = data.vector.x * 0.00015 * intensity;
-        const moveY = data.vector.y * 0.00015 * intensity;
-
-        const center = map.getCenter();
-        const lon = center.lng + (moveX * Math.cos(bearingRad) + moveY * Math.sin(bearingRad));
-        const lat = center.lat + (moveY * Math.cos(bearingRad) - moveX * Math.sin(bearingRad));
-
-        map.easeTo({ 
-          center: [lon, lat],
-          duration: 0,
+        // 🎮 [왼쪽 조이스틱] - 지도 이동
+        const leftManager = nipplejs.create({
+          zone: leftJoystickRef.current!,
+          mode: 'static',
+          position: { left: '50%', bottom: '50%' },
+          color: 'rgba(255, 255, 255, 0.9)',
+          size: 120,
+          threshold: 0.1,
+          fadeTime: 200,
+          restOpacity: 0.6,
         });
-      });
-    });
 
-    leftManager.on('end', () => {
-      if (moveAnimationFrame) {
-        cancelAnimationFrame(moveAnimationFrame);
-        moveAnimationFrame = null;
-      }
-    });
+        let moveAnimationFrame: number | null = null;
+        leftManager.on('move', (evt, data) => {
+          if (moveAnimationFrame) cancelAnimationFrame(moveAnimationFrame);
+          
+          moveAnimationFrame = requestAnimationFrame(() => {
+            const bearing = map.getBearing();
+            const bearingRad = (bearing * Math.PI) / 180;
+            
+            // 조이스틱 강도에 따른 이동 속도 (더 부드럽게)
+            const intensity = Math.min(data.distance / 50, 1); // 0~1 정규화
+            const moveX = data.vector.x * 0.00015 * intensity;
+            const moveY = data.vector.y * 0.00015 * intensity;
 
-    // 🎮 [오른쪽 조이스틱] - 지도 회전 및 기울기
-    const rightManager = nipplejs.create({
-      zone: rightJoystickRef.current,
-      mode: 'static',
-      position: { right: '50%', bottom: '50%' },
-      color: 'rgba(255, 215, 0, 0.9)',
-      size: 120,
-      threshold: 0.1,
-      fadeTime: 200,
-      restOpacity: 0.6,
-    });
+            const center = map.getCenter();
+            const lon = center.lng + (moveX * Math.cos(bearingRad) + moveY * Math.sin(bearingRad));
+            const lat = center.lat + (moveY * Math.cos(bearingRad) - moveX * Math.sin(bearingRad));
 
-    let rotateAnimationFrame: number | null = null;
-    rightManager.on('move', (evt, data) => {
-      if (rotateAnimationFrame) cancelAnimationFrame(rotateAnimationFrame);
-      
-      rotateAnimationFrame = requestAnimationFrame(() => {
-        const currentPitch = map.getPitch();
-        const currentBearing = map.getBearing();
-
-        // 조이스틱 강도에 따른 회전 속도
-        const intensity = Math.min(data.distance / 50, 1);
-        const nextBearing = currentBearing + data.vector.x * 2.5 * intensity;
-        const nextPitch = Math.min(
-          Math.max(currentPitch + data.vector.y * 1.5 * intensity, 0), 
-          85
-        );
-
-        map.easeTo({ 
-          bearing: nextBearing,
-          pitch: nextPitch,
-          duration: 0,
+            map.easeTo({ 
+              center: [lon, lat],
+              duration: 0,
+            });
+          });
         });
-      });
-    });
 
-    rightManager.on('end', () => {
-      if (rotateAnimationFrame) {
-        cancelAnimationFrame(rotateAnimationFrame);
-        rotateAnimationFrame = null;
+        leftManager.on('end', () => {
+          if (moveAnimationFrame) {
+            cancelAnimationFrame(moveAnimationFrame);
+            moveAnimationFrame = null;
+          }
+        });
+
+        // 🎮 [오른쪽 조이스틱] - 지도 회전 및 기울기
+        const rightManager = nipplejs.create({
+          zone: rightJoystickRef.current!,
+          mode: 'static',
+          position: { right: '50%', bottom: '50%' },
+          color: 'rgba(255, 215, 0, 0.9)',
+          size: 120,
+          threshold: 0.1,
+          fadeTime: 200,
+          restOpacity: 0.6,
+        });
+
+        let rotateAnimationFrame: number | null = null;
+        rightManager.on('move', (evt, data) => {
+          if (rotateAnimationFrame) cancelAnimationFrame(rotateAnimationFrame);
+          
+          rotateAnimationFrame = requestAnimationFrame(() => {
+            const currentPitch = map.getPitch();
+            const currentBearing = map.getBearing();
+
+            // 조이스틱 강도에 따른 회전 속도
+            const intensity = Math.min(data.distance / 50, 1);
+            const nextBearing = currentBearing + data.vector.x * 2.5 * intensity;
+            const nextPitch = Math.min(
+              Math.max(currentPitch + data.vector.y * 1.5 * intensity, 0), 
+              85
+            );
+
+            map.easeTo({ 
+              bearing: nextBearing,
+              pitch: nextPitch,
+              duration: 0,
+            });
+          });
+        });
+
+        rightManager.on('end', () => {
+          if (rotateAnimationFrame) {
+            cancelAnimationFrame(rotateAnimationFrame);
+            rotateAnimationFrame = null;
+          }
+        });
+
+        leftJoystickManagerRef.current = leftManager;
+        rightJoystickManagerRef.current = rightManager;
+      } catch (error) {
+        console.error('조이스틱 초기화 실패:', error);
       }
-    });
+    };
 
-    leftJoystickManagerRef.current = leftManager;
-    rightJoystickManagerRef.current = rightManager;
+    initJoysticks();
 
     return () => {
-      if (moveAnimationFrame) cancelAnimationFrame(moveAnimationFrame);
-      if (rotateAnimationFrame) cancelAnimationFrame(rotateAnimationFrame);
-      leftManager.destroy();
-      rightManager.destroy();
-      leftJoystickManagerRef.current = null;
-      rightJoystickManagerRef.current = null;
+      if (leftJoystickManagerRef.current) {
+        leftJoystickManagerRef.current.destroy();
+        leftJoystickManagerRef.current = null;
+      }
+      if (rightJoystickManagerRef.current) {
+        rightJoystickManagerRef.current.destroy();
+        rightJoystickManagerRef.current = null;
+      }
     };
   }, [isFullscreen]);
   
