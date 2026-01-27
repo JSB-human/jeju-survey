@@ -138,7 +138,7 @@ const MapView: React.FC<MapViewProps> = ({
         // 🎮 [왼쪽 조이스틱] - 지도 이동
         const leftManager = nipplejs.create({
           zone: leftJoystickRef.current!,
-          mode: 'relative',
+          mode: 'static',
           position: { left: '50%', bottom: '50%' },
           color: 'rgba(255, 255, 255, 0.9)',
           size: 120,
