@@ -138,7 +138,7 @@ const MapView: React.FC<MapViewProps> = ({
         // 🎮 [왼쪽 조이스틱] - 지도 이동
         const leftManager = nipplejs.create({
           zone: leftJoystickRef.current!,
-          mode: 'static',
+          mode: 'relative',
           position: { left: '50%', bottom: '50%' },
           color: 'rgba(255, 255, 255, 0.9)',
           size: 120,
@@ -925,18 +925,22 @@ const MapView: React.FC<MapViewProps> = ({
       {/* 🎮 조이스틱 컨트롤 (전체화면일 때만 표시) */}
       {isFullscreen && (
         <div className="absolute inset-0 pointer-events-none z-50">
-          <div className="flex justify-between items-end w-full h-full p-6 md:p-10">
+          <div 
+            className="flex justify-between items-end w-full h-full p-6 md:p-10"
+            style={{ 
+              // 🚨 핵심: iOS/안드로이드 하단 바 높이만큼 바닥에서 띄움
+              paddingBottom: 'calc(env(safe-area-inset-bottom) + 24px)' 
+            }}
+          >
             {/* 왼쪽 조이스틱 - 지도 이동 */}
             <div className="flex flex-col items-center gap-2">
               <div 
                 ref={leftJoystickRef} 
-                className="w-32 h-32 pointer-events-auto flex items-center justify-center relative"
+                className="w-28 h-28 md:w-32 md:h-32 pointer-events-auto flex items-center justify-center relative"
               >
-                {/* 조이스틱 배경 원형 가이드 */}
-                <div className="absolute inset-0 rounded-full border-2 border-white/30 bg-black/20 backdrop-blur-sm" />
-                {/* 레이블 */}
-                <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-white text-xs font-bold bg-black/50 px-2 py-1 rounded backdrop-blur-sm whitespace-nowrap">
-                  이동
+                <div className="absolute inset-0 rounded-full border-2 border-white/30 bg-black/40 backdrop-blur-md shadow-2xl" />
+                <div className="absolute -top-10 left-1/2 -translate-x-1/2 text-white text-[10px] font-black bg-black/60 px-2 py-1 rounded-full backdrop-blur-sm whitespace-nowrap uppercase tracking-widest">
+                  Move
                 </div>
               </div>
             </div>
@@ -945,13 +949,11 @@ const MapView: React.FC<MapViewProps> = ({
             <div className="flex flex-col items-center gap-2">
               <div 
                 ref={rightJoystickRef} 
-                className="w-32 h-32 pointer-events-auto flex items-center justify-center relative"
+                className="w-28 h-28 md:w-32 md:h-32 pointer-events-auto flex items-center justify-center relative"
               >
-                {/* 조이스틱 배경 원형 가이드 */}
-                <div className="absolute inset-0 rounded-full border-2 border-amber-400/30 bg-black/20 backdrop-blur-sm" />
-                {/* 레이블 */}
-                <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-white text-xs font-bold bg-black/50 px-2 py-1 rounded backdrop-blur-sm whitespace-nowrap">
-                  시점
+                <div className="absolute inset-0 rounded-full border-2 border-amber-400/40 bg-black/40 backdrop-blur-md shadow-2xl" />
+                <div className="absolute -top-10 left-1/2 -translate-x-1/2 text-amber-400 text-[10px] font-black bg-black/60 px-2 py-1 rounded-full backdrop-blur-sm whitespace-nowrap uppercase tracking-widest">
+                  Camera
                 </div>
               </div>
             </div>
